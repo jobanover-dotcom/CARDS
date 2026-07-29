@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Profile {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  name      String
+  role      String   @default("Warehouse")
+  warehouse String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseOrders PurchaseOrder[]
+}
+
+model PurchaseOrder {
+  id               String   @id @default(uuid())
+  date             String
+  poNumber         String   @unique
+  itemDescription  String
+  qty              Int
+  unit             String
+  supplier         String
+  supplierAddress  String?
+  requisitioner    String
+  mrsNo            String
+  poExpDate        String?
+  poRvdDate        String?
+  pickupBy         String
+  plateNumber      String?
+  approvedBy       String?
+  listedBy         String?
+  notes            String?
+  status           String   @default("incomplete")
+  poType           String   @default("active-delivery")
+  statusLabel      String   @default("Open")
+  warehouse        String
+
+  monQtyRvd        String?
+  monDeliveredBy   String?
+  monDateDelivered String?
+  monReferenceNo   String?
+  monDrDate        String?
+  monRemarks       String?
+
+  profileId String?
+  profile   Profile? @relation(fields: [profileId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model WarehouseRequest {
+  id              String   @id @default(uuid())
+  date            String
+  reqNumber       String   @unique
+  itemDescription String
+  qty             Int
+  unit            String
+  mrsNo           String
+  requestedBy     String
+  requisitioner   String
+  status          String   @default("Pending")
+  remarks         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model Warehouse {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+}
