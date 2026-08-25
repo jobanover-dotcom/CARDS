@@ -73,12 +73,12 @@ async function main() {
   }
 
   const requests = [
-    { date: '2025-01-21', reqNumber: 'REQ-88648', itemDescription: 'Stanly level bar', qty: 12, unit: 'pcs', mrsNo: 'MRS-101', requestedBy: 'John Doe', requisitioner: 'Bajada Warehouse', status: 'Approved', remarks: null },
-    { date: '2025-01-21', reqNumber: 'REQ-88648-B', itemDescription: 'Stanly level bar', qty: 12, unit: 'pcs', mrsNo: 'MRS-101', requestedBy: 'John Doe', requisitioner: 'Bajada Warehouse', status: 'Approved', remarks: null },
-    { date: '2025-01-22', reqNumber: 'REQ-88649', itemDescription: 'DeWalt Hammer Drill', qty: 5, unit: 'pcs', mrsNo: 'MRS-102', requestedBy: 'John Doe', requisitioner: 'Tagum Warehouse', status: 'Approved', remarks: null },
-    { date: '2025-01-23', reqNumber: 'REQ-88650', itemDescription: 'Bosch Angle Grinder', qty: 8, unit: 'pcs', mrsNo: 'MRS-103', requestedBy: 'Jane Smith', requisitioner: 'Bajada Warehouse', status: 'Pending', remarks: null },
-    { date: '2025-01-25', reqNumber: 'REQ-88652', itemDescription: 'Makita Circular Saw', qty: 3, unit: 'pcs', mrsNo: 'MRS-104', requestedBy: 'Bob Johnson', requisitioner: 'Tagum Warehouse', status: 'Approved', remarks: null },
-    { date: '2025-01-26', reqNumber: 'REQ-88653', itemDescription: 'Steel Rebar 10mm', qty: 150, unit: 'pcs', mrsNo: 'MRS-105', requestedBy: 'Charlie Brown', requisitioner: 'Bajada Warehouse', status: 'Rejected', remarks: 'Out of stock' },
+    { date: '2025-01-21', reqNumber: 'REQ-88648', itemDescription: 'Stanly level bar', qty: 12, unit: 'pcs', mrsNo: 'MRS-101', requestedBy: 'John Doe', requisitioner: 'Bajada Warehouse', warehouse: 'Bajada Warehouse', status: 'Approved', remarks: null },
+    { date: '2025-01-21', reqNumber: 'REQ-88648-B', itemDescription: 'Stanly level bar', qty: 12, unit: 'pcs', mrsNo: 'MRS-101', requestedBy: 'John Doe', requisitioner: 'Bajada Warehouse', warehouse: 'Bajada Warehouse', status: 'Approved', remarks: null },
+    { date: '2025-01-22', reqNumber: 'REQ-88649', itemDescription: 'DeWalt Hammer Drill', qty: 5, unit: 'pcs', mrsNo: 'MRS-102', requestedBy: 'John Doe', requisitioner: 'Tagum Warehouse', warehouse: 'Tagum Warehouse', status: 'Approved', remarks: null },
+    { date: '2025-01-23', reqNumber: 'REQ-88650', itemDescription: 'Bosch Angle Grinder', qty: 8, unit: 'pcs', mrsNo: 'MRS-103', requestedBy: 'Jane Smith', requisitioner: 'Bajada Warehouse', warehouse: 'Bajada Warehouse', status: 'Pending', remarks: null },
+    { date: '2025-01-25', reqNumber: 'REQ-88652', itemDescription: 'Makita Circular Saw', qty: 3, unit: 'pcs', mrsNo: 'MRS-104', requestedBy: 'Bob Johnson', requisitioner: 'Tagum Warehouse', warehouse: 'Tagum Warehouse', status: 'Approved', remarks: null },
+    { date: '2025-01-26', reqNumber: 'REQ-88653', itemDescription: 'Steel Rebar 10mm', qty: 150, unit: 'pcs', mrsNo: 'MRS-105', requestedBy: 'Charlie Brown', requisitioner: 'Bajada Warehouse', warehouse: 'Bajada Warehouse', status: 'Rejected', remarks: 'Out of stock' },
   ];
 
   for (const req of requests) {

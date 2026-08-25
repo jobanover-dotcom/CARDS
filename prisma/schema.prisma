@@ -65,8 +65,11 @@ model WarehouseRequest {
   mrsNo           String
   requestedBy     String
   requisitioner   String
+  warehouse       String?
   status          String   @default("Pending")
   remarks         String?
+  approvedQty     Int?
+  followUpOfReqNumber String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 }
@@ -75,4 +78,16 @@ model Warehouse {
   id        String   @id @default(uuid())
   name      String   @unique
   createdAt DateTime @default(now())
+}
+
+model WarehouseArchive {
+  id            String   @id @default(uuid())
+  warehouseName String
+  reason        String
+  clearedAt     DateTime @default(now())
+  poCount       Int      @default(0)
+  requestCount  Int      @default(0)
+  poData        Json
+  requestData   Json
+  createdAt     DateTime @default(now())
 }

@@ -3,11 +3,27 @@ import React, { useState } from 'react';
 import StatusBadge from '../ui/StatusBadge';
 import EmptyState from '../ui/EmptyState';
 import CreateRequestModal from './CreateRequestModal';
+import PageSkeleton from '../ui/PageSkeleton';
+import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useWarehouseData } from '../../context/WarehouseDataContext';
+import { getRequests } from '../../../actions/requests';
+import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function RequestsView() {
-  const { requestsList } = useWarehouseData();
+  const { requestVersion } = useWarehouseData();
   const [newRequestModal, setNewRequestModal] = useState(false);
+  const [followUpReq, setFollowUpReq] = useState(null);
+
+  const { rows: requestsList, total, initialLoading, loadingMore, hasMore, loadMore } =
+    useInfiniteRows(getRequests, {}, requestVersion);
+
+  if (initialLoading) {
+    return (
+      <div className="bg-white rounded-lg p-6 text-left">
+        <PageSkeleton statCards={0} />
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-lg p-6 text-left">
@@ -26,37 +42,67 @@ function RequestsView() {
 
       <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
         <div className="overflow-x-auto max-h-[500px]">
-          <table className="w-full border-collapse text-[13px]">
+          <table className="w-full min-w-[900px] border-collapse text-[13px]">
             <thead className="bg-[#f0f4f8] sticky top-0 z-10">
               <tr>
-                {['Date', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Status'].map((h, i) => (
-                  <th key={i} className="p-4 text-left font-bold text-[#555] border-b border-gray-200">{h}</th>
+                {['Date', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Approved', 'Balance', 'Status', 'Action'].map((h, i) => (
+                  <th key={i} className="p-4 text-left font-bold text-[#555] border-b border-gray-200 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {requestsList.length > 0 ? (
-                requestsList.map((req, index) => (
-                  <tr key={index} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                    <td className="p-4 text-[#333] font-medium">{req.date}</td>
-                    <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                    <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
-                    <td className="p-4 text-[#333] font-medium">{req.qty}</td>
-                    <td className="p-4 text-[#333] font-medium">{req.unit}</td>
-                    <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
-                    <td className="p-4"><StatusBadge status={req.status} /></td>
-                  </tr>
-                ))
+                <>
+                  {requestsList.map((req, index) => {
+                    const balance = req.approvedQty != null ? Math.max(0, req.qty - req.approvedQty) : null;
+                    return (
+                      <tr key={index} className={`border-b border-gray-200 ${balance > 0 ? 'bg-[#fff8e1]/60' : index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                        <td className="p-4 text-[#333] font-medium">{req.date}</td>
+                        <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
+                        <td className="p-4 text-[#333] font-medium">
+                          {req.itemDescription}
+                          {req.followUpOfReqNumber && (
+                            <span className="ml-2 px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#5e35b1] text-[10px] font-bold align-middle" title={`Follow-up of ${req.followUpOfReqNumber}`}>
+                              Follow-up
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-4 text-[#333] font-medium">{req.qty}</td>
+                        <td className="p-4 text-[#333] font-medium">{req.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
+                        <td className="p-4 text-[#333] font-medium">{req.approvedQty ?? '—'}</td>
+                        <td className={`p-4 font-bold ${balance > 0 ? 'text-[#ef6c00]' : 'text-[#333] font-medium'}`}>{balance ?? '—'}</td>
+                        <td className="p-4"><StatusBadge status={req.status} /></td>
+                        <td className="p-4">
+                          {req.status === 'Partially Approved' && balance > 0 && (
+                            <button
+                              onClick={() => setFollowUpReq(req)}
+                              className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00]"
+                            >
+                              File Follow-Up
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <TableScrollSentinel colSpan={10} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                </>
               ) : (
-                <EmptyState colSpan={7} message="No requests found" />
+                <EmptyState colSpan={10} message="No requests found" />
               )}
             </tbody>
           </table>
         </div>
       </div>
+      <p className="mt-2 text-right text-xs text-[#999]">Loaded {requestsList.length} of {total} requests</p>
 
       {newRequestModal && (
         <CreateRequestModal onClose={() => setNewRequestModal(false)} />
+      )}
+
+      {followUpReq && (
+        <CreateRequestModal followUp={followUpReq} onClose={() => setFollowUpReq(null)} />
       )}
     </div>
   );

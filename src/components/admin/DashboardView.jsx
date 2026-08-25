@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import StatCard from '../ui/StatCard';
 import StackedStatCard from '../ui/StackedStatCard';
 import SearchInput from '../ui/SearchInput';
@@ -7,38 +7,66 @@ import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import GenerateReportButton from './GenerateReportButton';
 import WarehouseFilter from './WarehouseFilter';
+import PageSkeleton from '../ui/PageSkeleton';
+import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
+import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
+import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function DashboardView() {
-  const { purchaseOrders, warehouses } = useAdminData();
+  const { warehouses, poVersion } = useAdminData();
   const [selectedStat, setSelectedStat] = useState(null);
+  const [dashboardSearchInput, setDashboardSearchInput] = useState('');
   const [dashboardSearchQuery, setDashboardSearchQuery] = useState('');
   const [selectedWarehouse, setSelectedWarehouse] = useState('');
   const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [scopedStats, setScopedStats] = useState(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDashboardSearchQuery(dashboardSearchInput), 300);
+    return () => clearTimeout(t);
+  }, [dashboardSearchInput]);
+
+  const queryParams = useMemo(() => ({
+    status: selectedStat === 'completed' ? 'completed' : undefined,
+    poType: selectedStat === 'discrepancy' ? 'discrepancy' : selectedStat === 'active-delivery' ? 'active-delivery' : undefined,
+    search: dashboardSearchQuery || undefined,
+    warehouse: selectedWarehouse || undefined,
+  }), [selectedStat, dashboardSearchQuery, selectedWarehouse]);
+
+  const { rows: purchaseOrders, total, initialLoading, loadingMore, hasMore, loadMore } =
+    useInfiniteRows(getPOs, queryParams, poVersion);
+
+  useEffect(() => {
+    let cancelled = false;
+    getPOStats(selectedWarehouse || undefined)
+      .then(s => { if (!cancelled) setScopedStats(s); })
+      .catch(e => console.error('Failed to load dashboard stats', e));
+    return () => { cancelled = true; };
+  }, [selectedWarehouse, poVersion]);
+
+  const stats = scopedStats;
+  const whTotalPOs = stats?.totalPOs ?? 0;
+  const whCompletedPOs = stats?.completedPOs ?? 0;
+  const whDiscrepancyPOs = stats?.discrepancyCount ?? 0;
+  const whActiveDeliveryPOs = stats?.activeDeliveryCount ?? 0;
+  const whIncompletePOs = whTotalPOs - whCompletedPOs;
 
   const handleOpenReceipt = (po) => {
     setSelectedReceiptPo(po);
     setShowReceiptModal(true);
   };
 
-  const warehouseFilteredPOs = selectedWarehouse
-    ? purchaseOrders.filter(o => o.warehouse === selectedWarehouse)
-    : purchaseOrders;
+  const fetchReportData = () => getReportData(queryParams);
 
-  const whTotalPOs = warehouseFilteredPOs.length;
-  const whCompletedPOs = warehouseFilteredPOs.filter(o => o.status === 'completed').length;
-  const whDiscrepancyPOs = warehouseFilteredPOs.filter(o => o.poType === 'discrepancy').length;
-  const whActiveDeliveryPOs = warehouseFilteredPOs.filter(o => o.poType === 'active-delivery').length;
-  const whIncompletePOs = whTotalPOs - whCompletedPOs;
-
-  const filteredOrders = warehouseFilteredPOs.filter(order => {
-    if (selectedStat === 'completed' && order.status !== 'completed') return false;
-    if (selectedStat === 'discrepancy' && order.poType !== 'discrepancy') return false;
-    if (selectedStat === 'active-delivery' && order.poType !== 'active-delivery') return false;
-    if (dashboardSearchQuery && !order.poNumber.includes(dashboardSearchQuery)) return false;
-    return true;
-  });
+  if (initialLoading) {
+    return (
+      <div className="bg-white rounded-lg p-6">
+        <PageSkeleton />
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-lg p-6">
@@ -91,10 +119,10 @@ function DashboardView() {
         <div className="flex items-center justify-between gap-4 mb-4">
           <SearchInput
             placeholder="Search PO number..."
-            value={dashboardSearchQuery}
-            onChange={(e) => setDashboardSearchQuery(e.target.value)}
+            value={dashboardSearchInput}
+            onChange={(e) => setDashboardSearchInput(e.target.value)}
           />
-          <GenerateReportButton filteredOrders={filteredOrders} totalPOs={whTotalPOs} completedPOs={whCompletedPOs} incompletePOs={whIncompletePOs} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} />
+          <GenerateReportButton fetchReportData={fetchReportData} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} />
         </div>
         <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
@@ -128,37 +156,40 @@ function DashboardView() {
                 </tr>
               </thead>
               <tbody>
-                {filteredOrders.length > 0 ? (
-                  filteredOrders.map((order, index) => {
-                    const isCompletedOrActive = order.status === 'completed' || order.poType === 'active-delivery';
-                    const hasMonitoring = order.monQtyRvd && order.monQtyRvd !== '';
-                    const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== order.qty;
-                    const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
-                    return (
-                      <tr key={index} onClick={() => handleOpenReceipt(order)} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${rowBg} hover:bg-[#f0f8fc]/50`}>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.poNumber}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.date}</td>
-                        <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.itemDescription}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold bg-red-50' : 'text-[#333]'}`}>{order.monQtyRvd || '-'}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.unit}</td>
-                        <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDeliveredBy || '-'}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDateDelivered || '-'}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monReferenceNo || '-'}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDrDate || '-'}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.pickupBy}</td>
-                      </tr>
-                    );
-                  })
+                {purchaseOrders.length > 0 ? (
+                  <>
+                    {purchaseOrders.map((order, index) => {
+                      const isCompletedOrActive = order.status === 'completed' || order.poType === 'active-delivery';
+                      const hasMonitoring = order.monQtyRvd && order.monQtyRvd !== '';
+                      const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== order.qty;
+                      const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
+                      return (
+                        <tr key={index} onClick={() => handleOpenReceipt(order)} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${rowBg} hover:bg-[#f0f8fc]/50`}>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
+                          <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
+                          <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
+                          <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.poNumber}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.date}</td>
+                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.itemDescription}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold bg-red-50' : 'text-[#333]'}`}>{order.monQtyRvd || '-'}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.unit}</td>
+                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDeliveredBy || '-'}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDateDelivered || '-'}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monReferenceNo || '-'}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDrDate || '-'}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.pickupBy}</td>
+                        </tr>
+                      );
+                    })}
+                    <TableScrollSentinel colSpan={20} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  </>
                 ) : (
                   <EmptyState colSpan={20} message="No purchase orders found" />
                 )}
@@ -166,6 +197,7 @@ function DashboardView() {
             </table>
           </div>
         </div>
+        <p className="mt-2 text-right text-xs text-[#999]">Loaded {purchaseOrders.length} of {total} purchase orders</p>
       </div>
 
       {showReceiptModal && selectedReceiptPo && (

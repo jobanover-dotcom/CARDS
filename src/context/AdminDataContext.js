@@ -1,110 +1,94 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getPOs, getPOStats, createPO as createPOServer, updatePO as updatePOServer } from '../../actions/pos';
-import { getRequests, approveRequest, declineRequest, approveRequestsByMrsNo } from '../../actions/requests';
-import { getUsers, addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
-import { getWarehouses, addWarehouse as addWarehouseServer, deleteWarehouse as deleteWarehouseServer } from '../../actions/warehouses';
+import { getPOStats, createPO as createPOServer, updatePO as updatePOServer } from '../../actions/pos';
+import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
+import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
+import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
+import { deleteWarehouseWithArchive } from '../../actions/archive';
 
 const AdminDataContext = createContext(null);
 
 export function AdminDataProvider({ children }) {
-  const [purchaseOrders, setPurchaseOrders] = useState([]);
-  const [warehouseRequests, setWarehouseRequests] = useState([]);
-  const [warehouseUsers, setWarehouseUsers] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
+  const [stats, setStats] = useState({
+    totalPOs: 0, completedPOs: 0, incompletePOs: 0,
+    activeDeliveryCount: 0, discrepancyCount: 0,
+  });
+  const [requestCounts, setRequestCounts] = useState({ total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0 });
   const [loading, setLoading] = useState(true);
+  const [poVersion, setPoVersion] = useState(0);
+  const [requestVersion, setRequestVersion] = useState(0);
+  const [userVersion, setUserVersion] = useState(0);
 
-  const [totalPOs, setTotalPOs] = useState(0);
-  const [completedPOs, setCompletedPOs] = useState(0);
-  const [incompletePOs, setIncompletePOs] = useState(0);
-  const [activeDeliveryCount, setActiveDeliveryCount] = useState(0);
-  const [discrepancyCount, setDiscrepancyCount] = useState(0);
-  const [pendingRequestsCount, setPendingRequestsCount] = useState(0);
-  const [rejectedRequestsCount, setRejectedRequestsCount] = useState(0);
-
-  const refresh = useCallback(async () => {
+  const refreshStats = useCallback(async () => {
     try {
-      const [pos, reqs, users, whs, stats] = await Promise.all([
-        getPOs(),
-        getRequests(),
-        getUsers(),
-        getWarehouses(),
-        getPOStats(),
-      ]);
-      setPurchaseOrders(pos);
-      setWarehouseRequests(reqs);
-      setWarehouseUsers(users);
-      setWarehouses(whs.map(w => w.name));
-      setTotalPOs(stats.totalPOs);
-      setCompletedPOs(stats.completedPOs);
-      setIncompletePOs(stats.incompletePOs);
-      setActiveDeliveryCount(stats.activeDeliveryCount);
-      setDiscrepancyCount(stats.discrepancyCount);
-      setPendingRequestsCount(reqs.filter(r => r.status === 'Pending').length);
-      setRejectedRequestsCount(reqs.filter(r => r.status === 'Rejected').length);
+      setStats(await getPOStats());
     } catch (e) {
-      console.error('Failed to load admin data', e);
-    } finally {
-      setLoading(false);
+      console.error('Failed to load PO stats', e);
+    }
+  }, []);
+
+  const refreshRequestCounts = useCallback(async () => {
+    try {
+      setRequestCounts(await getRequestCounts());
+    } catch (e) {
+      console.error('Failed to load request counts', e);
     }
   }, []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const [whs] = await Promise.all([getWarehouses(), refreshStats(), refreshRequestCounts()]);
+        if (!cancelled) setWarehouses(whs.map(w => w.name));
+      } catch (e) {
+        console.error('Failed to load admin data', e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [refreshStats, refreshRequestCounts]);
 
-  const createPO = useCallback(async (data) => {
-    const po = await createPOServer(data);
-    setPurchaseOrders(prev => [po, ...prev]);
-    if (data.mrsNo) {
-      await approveRequestsByMrsNo(data.mrsNo);
-      setWarehouseRequests(prev =>
-        prev.map(req => req.mrsNo === data.mrsNo ? { ...req, status: 'Approved' } : req)
-      );
+  const createPO = useCallback(async (data, source = null) => {
+    await createPOServer(data);
+    if (source?.reqNumber) {
+      await approveRequestPartial(source.reqNumber, source.approvedQty ?? data.qty);
     }
-    const stats = await getPOStats();
-    setTotalPOs(stats.totalPOs);
-    setCompletedPOs(stats.completedPOs);
-    setIncompletePOs(stats.incompletePOs);
-    setActiveDeliveryCount(stats.activeDeliveryCount);
-    setDiscrepancyCount(stats.discrepancyCount);
-  }, []);
+    setPoVersion(v => v + 1);
+    setRequestVersion(v => v + 1);
+    await Promise.all([refreshStats(), refreshRequestCounts()]);
+  }, [refreshStats, refreshRequestCounts]);
 
   const updatePO = useCallback(async (poNumber, data) => {
-    const updated = await updatePOServer(poNumber, data);
-    setPurchaseOrders(prev => prev.map(po => po.poNumber === poNumber ? { ...po, ...updated } : po));
-    const stats = await getPOStats();
-    setTotalPOs(stats.totalPOs);
-    setCompletedPOs(stats.completedPOs);
-    setIncompletePOs(stats.incompletePOs);
-    setActiveDeliveryCount(stats.activeDeliveryCount);
-    setDiscrepancyCount(stats.discrepancyCount);
-  }, []);
+    await updatePOServer(poNumber, data);
+    setPoVersion(v => v + 1);
+    await refreshStats();
+  }, [refreshStats]);
 
   const addUser = useCallback(async (data) => {
     const user = await addUserServer(data);
-    setWarehouseUsers(prev => [...prev, user]);
+    setUserVersion(v => v + 1);
     return user;
   }, []);
 
   const deleteUser = useCallback(async (username) => {
     await deleteUserServer(username);
-    setWarehouseUsers(prev => prev.filter(u => u.username !== username));
+    setUserVersion(v => v + 1);
   }, []);
 
   const handleApproveRequest = useCallback(async (reqNumber) => {
-    await approveRequest(reqNumber);
-    setWarehouseRequests(prev => prev.map(req =>
-      req.reqNumber === reqNumber ? { ...req, status: 'Approved' } : req
-    ));
-  }, []);
+    await approveRequestPartial(reqNumber);
+    setRequestVersion(v => v + 1);
+    await refreshRequestCounts();
+  }, [refreshRequestCounts]);
 
   const handleDeclineRequest = useCallback(async (reqNumber, remarks) => {
     await declineRequest(reqNumber, remarks);
-    setWarehouseRequests(prev => prev.map(req =>
-      req.reqNumber === reqNumber ? { ...req, status: 'Rejected', remarks } : req
-    ));
-  }, []);
+    setRequestVersion(v => v + 1);
+    await refreshRequestCounts();
+  }, [refreshRequestCounts]);
 
   const handleAddWarehouse = useCallback(async (name) => {
     const wh = await addWarehouseServer(name);
@@ -113,25 +97,25 @@ export function AdminDataProvider({ children }) {
   }, []);
 
   const handleDeleteWarehouse = useCallback(async (name) => {
-    await deleteWarehouseServer(name);
+    await deleteWarehouseWithArchive(name);
     setWarehouses(prev => prev.filter(w => w !== name));
   }, []);
 
   const assignWarehouse = useCallback(async (username, warehouse) => {
     await updateUserWarehouse(username, warehouse);
-    setWarehouseUsers(prev => prev.map(u => u.username === username ? { ...u, warehouse } : u));
+    setUserVersion(v => v + 1);
   }, []);
 
   return (
     <AdminDataContext.Provider value={{
-      purchaseOrders, setPurchaseOrders,
-      warehouseRequests, setWarehouseRequests,
-      warehouseUsers, setWarehouseUsers,
-      warehouses, setWarehouses,
+      warehouses,
+      stats,
+      requestCounts,
       loading,
-      totalPOs, completedPOs, incompletePOs,
-      activeDeliveryCount, discrepancyCount,
-      pendingRequestsCount, rejectedRequestsCount,
+      poVersion,
+      requestVersion,
+      userVersion,
+      refreshStats,
       createPO, updatePO, addUser, deleteUser, assignWarehouse,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,

@@ -12,9 +12,15 @@ const logoutIcon = (
   </svg>
 );
 
-function Sidebar({ menuItems, logo, badge }) {
-  const { logout } = useAuth();
+function Sidebar({ menuItems, logo }) {
+  const { user, logout } = useAuth();
   const pathname = usePathname();
+
+  const userBadge = user?.role === 'Superadmin'
+    ? 'Admin'
+    : user?.role === 'Admin'
+      ? 'Purchaser'
+      : user?.warehouse || 'Warehouse';
 
   return (
     <div className="w-[240px] max-md:w-full bg-[#e8eef2] p-6 max-md:p-4 flex flex-col max-md:flex-row max-md:items-center border-r border-[#ddd] max-md:border-r-0 max-md:border-b overflow-y-auto">
@@ -22,7 +28,7 @@ function Sidebar({ menuItems, logo, badge }) {
         {logo}
         <div className="flex-1">
           <h3 className="m-0 text-sm font-semibold text-[#333]">Carwill Construction Inc.</h3>
-          <span className="inline-block bg-[#7ec8e3] text-white px-2 py-1 rounded text-[11px] font-semibold mt-1">{badge}</span>
+          <span className="inline-block bg-[#7ec8e3] text-white px-2 py-1 rounded text-[11px] font-semibold mt-1">{userBadge}</span>
         </div>
       </div>
 

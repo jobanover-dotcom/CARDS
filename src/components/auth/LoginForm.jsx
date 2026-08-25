@@ -5,7 +5,7 @@ function LoginForm({ onLogin }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     if (!username || !password) {
@@ -13,7 +13,7 @@ function LoginForm({ onLogin }) {
       return;
     }
 
-    const result = onLogin({ username, password });
+    const result = await onLogin({ username, password });
 
     if (result && result.error) {
       setError(result.error);

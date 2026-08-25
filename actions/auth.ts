@@ -5,14 +5,37 @@ import { prisma } from '@/lib/prisma';
 
 const EMAIL_DOMAIN = '@cards.app';
 
+function getAuthErrorMessage(error: unknown): string {
+  const status = (error as { status?: number } | null)?.status;
+  if (status === 400) return 'Invalid username or password';
+  if (!status || status >= 500) {
+    return 'Unable to connect to the authentication service. Check your internet connection and try again.';
+  }
+  if (status === 429) return 'Too many login attempts. Please wait a moment and try again.';
+  return (error as { message?: string })?.message ?? 'An unexpected error occurred. Please try again.';
+}
+
+export async function getCurrentUser() {
+  const supabase = await createServerSupabase();
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return null;
+  return prisma.profile.findUnique({ where: { id: session.user.id } });
+}
+
 export async function login(username: string, password: string) {
   const supabase = await createServerSupabase();
   const email = username.includes('@') ? username : `${username}${EMAIL_DOMAIN}`;
 
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return { error: 'Invalid username or password' };
+  if (error) return { error: getAuthErrorMessage(error) };
 
-  const profile = await prisma.profile.findUnique({ where: { username } });
+  let profile = null;
+  try {
+    profile = await prisma.profile.findUnique({ where: { username } });
+  } catch {
+    await supabase.auth.signOut();
+    return { error: 'Database temporarily unavailable. Please try again.' };
+  }
 
   if (!profile) {
     await supabase.auth.signOut();

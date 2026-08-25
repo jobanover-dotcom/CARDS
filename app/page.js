@@ -2,6 +2,7 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../src/context/AuthContext';
+import PageSkeleton from '../src/components/ui/PageSkeleton';
 
 function Home() {
   const { isLoggedIn, user, loading } = useAuth();
@@ -25,8 +26,8 @@ function Home() {
   }, [loading, isLoggedIn, user, router]);
 
   return (
-    <div className="w-full h-full min-h-screen bg-slate-100 flex items-center justify-center">
-      <p className="text-[#666] text-sm">{loading ? 'Loading...' : 'Redirecting...'}</p>
+    <div className="w-full h-full min-h-screen bg-slate-100 p-8 max-md:p-4">
+      <PageSkeleton />
     </div>
   );
 }

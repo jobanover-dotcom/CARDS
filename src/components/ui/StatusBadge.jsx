@@ -3,6 +3,7 @@ import React from 'react';
 
 const statusStyles = {
   Approved: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
+  'Partially Approved': 'bg-[#fff3e0] text-[#ef6c00] border-[#ffcc80]',
   Completed: 'bg-gray-100 text-gray-700 border-gray-300',
   Open: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
   Pending: 'bg-yellow-50 text-yellow-700 border-yellow-300',

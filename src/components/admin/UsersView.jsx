@@ -1,9 +1,13 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
+import PageSkeleton from '../ui/PageSkeleton';
+import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
 import { useAuth } from '../../context/AuthContext';
+import { getUsers } from '../../../actions/users';
+import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 const ROLE_OPTIONS = [
   { value: 'Warehouse', label: 'Warehouse' },
@@ -11,8 +15,9 @@ const ROLE_OPTIONS = [
 ];
 
 function UsersView() {
-  const { warehouseUsers, setWarehouseUsers, warehouses, addUser, deleteUser, assignWarehouse, addWarehouse, deleteWarehouse } = useAdminData();
+  const { warehouses, userVersion, addUser, deleteUser, assignWarehouse, addWarehouse, deleteWarehouse } = useAdminData();
   const { adminResetPassword } = useAuth();
+  const [userSearchInput, setUserSearchInput] = useState('');
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [newUserName, setNewUserName] = useState('');
@@ -21,6 +26,18 @@ function UsersView() {
   const [newUserWarehouse, setNewUserWarehouse] = useState(warehouses[0] || '');
   const [showAddWarehouseModal, setShowAddWarehouseModal] = useState(false);
   const [newWarehouseName, setNewWarehouseName] = useState('');
+
+  useEffect(() => {
+    const t = setTimeout(() => setUserSearchQuery(userSearchInput), 300);
+    return () => clearTimeout(t);
+  }, [userSearchInput]);
+
+  const queryParams = useMemo(() => ({
+    search: userSearchQuery || undefined,
+  }), [userSearchQuery]);
+
+  const { rows: filteredUsers, total: totalUsers, initialLoading, loadingMore, hasMore, loadMore } =
+    useInfiniteRows(getUsers, queryParams, userVersion);
 
   const handleAddUser = async () => {
     if (!newUserName || !newUserUsername) {
@@ -82,11 +99,17 @@ function UsersView() {
     if (warehouses.length <= 1) { alert('You must have at least one warehouse in the system.'); return; }
     if (window.confirm(`Are you sure you want to delete "${name}"?`)) {
       await deleteWarehouse(name);
-      setWarehouseUsers(prev => prev.map(u => u.warehouse === name ? { ...u, warehouse: prev[0]?.warehouse || '' } : u));
     }
   };
 
-  const filteredUsers = warehouseUsers.filter(u => u.name.toLowerCase().includes(userSearchQuery.toLowerCase()));
+  if (initialLoading) {
+    return (
+      <div className="bg-white rounded-lg p-8">
+        <h2 className="m-0 text-3xl text-[#333] mb-4">Users &amp; Warehouses</h2>
+        <PageSkeleton statCards={0} />
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-lg p-8">
@@ -100,7 +123,7 @@ function UsersView() {
             Add Warehouse
           </button>
         </div>
-        <SearchInput placeholder="Search user by name..." value={userSearchQuery} onChange={(e) => setUserSearchQuery(e.target.value)} />
+        <SearchInput placeholder="Search user by name..." value={userSearchInput} onChange={(e) => setUserSearchInput(e.target.value)} />
       </div>
       <div className="overflow-x-auto">
         <table className="w-full border-collapse text-[13px]">
@@ -114,30 +137,36 @@ function UsersView() {
             </tr>
           </thead>
           <tbody>
-            {filteredUsers.length > 0 ? filteredUsers.map(u => (
-              <tr key={u.id} className="border-b border-gray-200 hover:bg-[#f0f8fc]/50">
-                <td className="p-4 text-[#333]">{u.name}</td>
-                <td className="p-4 text-[#333]">{u.username}</td>
-                <td className="p-4 text-[#333]">{u.role === 'Admin' ? 'Purchaser (Admin)' : 'Warehouse'}</td>
-                <td className="p-4 text-[#333]">{u.warehouse || '-'}</td>
-                <td className="p-4 flex items-center gap-2 flex-wrap">
-                  <button className="text-[#f57c00] text-xs border border-[#f57c00] px-2 py-0.5 rounded hover:bg-[#f57c00]/10" onClick={() => handleResetPassword(u.username)}>
-                    Reset Password
-                  </button>
-                  {u.role === 'Warehouse' && (
-                    <select value={u.warehouse} onChange={(e) => handleAssignWarehouse(u.username, e.target.value)} className="p-1 border rounded text-xs">
-                      {warehouses.map(w => <option key={w} value={w}>{w}</option>)}
-                    </select>
-                  )}
-                  <button className="text-[#d32f2f] text-xs" onClick={() => handleDeleteUser(u.username)}>Delete</button>
-                </td>
-              </tr>
-            )) : (
+            {filteredUsers.length > 0 ? (
+              <>
+                {filteredUsers.map(u => (
+                  <tr key={u.id} className="border-b border-gray-200 hover:bg-[#f0f8fc]/50">
+                    <td className="p-4 text-[#333]">{u.name}</td>
+                    <td className="p-4 text-[#333]">{u.username}</td>
+                    <td className="p-4 text-[#333]">{u.role === 'Admin' ? 'Purchaser (Admin)' : 'Warehouse'}</td>
+                    <td className="p-4 text-[#333]">{u.warehouse || '-'}</td>
+                    <td className="p-4 flex items-center gap-2 flex-wrap">
+                      <button className="text-[#f57c00] text-xs border border-[#f57c00] px-2 py-0.5 rounded hover:bg-[#f57c00]/10" onClick={() => handleResetPassword(u.username)}>
+                        Reset Password
+                      </button>
+                      {u.role === 'Warehouse' && (
+                        <select value={u.warehouse} onChange={(e) => handleAssignWarehouse(u.username, e.target.value)} className="p-1 border rounded text-xs">
+                          {warehouses.map(w => <option key={w} value={w}>{w}</option>)}
+                        </select>
+                      )}
+                      <button className="text-[#d32f2f] text-xs" onClick={() => handleDeleteUser(u.username)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+                <TableScrollSentinel colSpan={5} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+              </>
+            ) : (
               <EmptyState colSpan={5} message="No users found" />
             )}
           </tbody>
         </table>
       </div>
+      <p className="mt-2 text-right text-xs text-[#999]">Loaded {filteredUsers.length} of {totalUsers} users</p>
 
       <div className="mt-10 border-t pt-8">
         <h3 className="m-0 text-xl font-bold text-[#1e3c72] mb-4">Active Warehouses List</h3>

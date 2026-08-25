@@ -1,17 +1,22 @@
 'use client';
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import StatCard from '../ui/StatCard';
 import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import POCreationForm from './POCreationForm';
+import PageSkeleton from '../ui/PageSkeleton';
+import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
+import { getPOs } from '../../../actions/pos';
+import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function PurchaseOrderContent() {
-  const { purchaseOrders, setPurchaseOrders, activeDeliveryCount, discrepancyCount, warehouseRequests, setWarehouseRequests } = useAdminData();
+  const { stats, poVersion } = useAdminData();
   const searchParams = useSearchParams();
   const [selectedPoType, setSelectedPoType] = useState('all');
+  const [poSearchInput, setPoSearchInput] = useState('');
   const [poSearchQuery, setPoSearchQuery] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
@@ -21,13 +26,29 @@ function PurchaseOrderContent() {
   const [initialFormData, setInitialFormData] = useState(null);
 
   useEffect(() => {
+    const t = setTimeout(() => setPoSearchQuery(poSearchInput), 300);
+    return () => clearTimeout(t);
+  }, [poSearchInput]);
+
+  const queryParams = useMemo(() => ({
+    poType: selectedPoType !== 'all' ? selectedPoType : undefined,
+    search: poSearchQuery || undefined,
+  }), [selectedPoType, poSearchQuery]);
+
+  const { rows: purchaseOrders, total, initialLoading, loadingMore, hasMore, loadMore } =
+    useInfiniteRows(getPOs, queryParams, poVersion);
+
+  useEffect(() => {
     if (searchParams.get('openPOModal') === 'true') {
       setInitialFormData({
         itemDescription: searchParams.get('itemDescription') || '',
         qty: searchParams.get('qty') || '',
+        requestedQty: searchParams.get('requestedQty') || '',
         unit: searchParams.get('unit') || 'pcs',
         requisitioner: searchParams.get('requisitioner') || '',
         mrsNo: searchParams.get('mrsNo') || '',
+        sourceReqNumber: searchParams.get('reqNumber') || null,
+        sourceRequestWarehouse: searchParams.get('requestWarehouse') || '',
         approvedBy: searchParams.get('approvedBy') || '',
         approvalDate: searchParams.get('approvalDate') || '',
       });
@@ -40,12 +61,6 @@ function PurchaseOrderContent() {
     setShowReceiptModal(true);
   };
 
-  const filteredOrders = purchaseOrders.filter(order => {
-    if (selectedPoType !== 'all' && order.poType !== selectedPoType) return false;
-    if (poSearchQuery && !order.poNumber.includes(poSearchQuery)) return false;
-    return true;
-  });
-
   const handleSuccess = () => {
     setShowSuccessModal(true);
   };
@@ -55,6 +70,14 @@ function PurchaseOrderContent() {
     setInitialFormData(null);
   };
 
+  if (initialLoading) {
+    return (
+      <div className="bg-white rounded-lg p-6">
+        <PageSkeleton />
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white rounded-lg p-6">
       <div className="mb-8">
@@ -63,9 +86,9 @@ function PurchaseOrderContent() {
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
-        <StatCard label="Total POs" count={purchaseOrders.length} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
-        <StatCard label="Active Delivery" count={activeDeliveryCount} description="Orders currently in delivery" color="green" isActive={selectedPoType === 'active-delivery'} onClick={() => setSelectedPoType('active-delivery')} />
-        <StatCard label="Discrepancies" count={discrepancyCount} description="Orders with issues" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
+        <StatCard label="Total POs" count={stats.totalPOs} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
+        <StatCard label="Active Delivery" count={stats.activeDeliveryCount} description="Orders currently in delivery" color="green" isActive={selectedPoType === 'active-delivery'} onClick={() => setSelectedPoType('active-delivery')} />
+        <StatCard label="Discrepancies" count={stats.discrepancyCount} description="Orders with issues" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
       </div>
 
       <div className="mb-6">
@@ -83,7 +106,7 @@ function PurchaseOrderContent() {
             {selectedPoType === 'all' ? 'All purchase orders' : selectedPoType === 'active-delivery' ? 'Purchase orders currently active and out for delivery' : 'Purchase orders with identified discrepancies'}
           </p>
         </div>
-        <SearchInput placeholder="Search PO number..." value={poSearchQuery} onChange={(e) => setPoSearchQuery(e.target.value)} />
+        <SearchInput placeholder="Search PO number..." value={poSearchInput} onChange={(e) => setPoSearchInput(e.target.value)} />
         <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-[13px]">
@@ -95,22 +118,25 @@ function PurchaseOrderContent() {
                 </tr>
               </thead>
               <tbody>
-                {filteredOrders.length > 0 ? (
-                  filteredOrders.map((order, index) => (
-                    <tr key={index} onClick={() => handleOpenReceipt(order)}
-                      className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50`}>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
-                      <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
-                    </tr>
-                  ))
+                {purchaseOrders.length > 0 ? (
+                  <>
+                    {purchaseOrders.map((order, index) => (
+                      <tr key={index} onClick={() => handleOpenReceipt(order)}
+                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50`}>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
+                      </tr>
+                    ))}
+                    <TableScrollSentinel colSpan={10} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  </>
                 ) : (
                   <EmptyState colSpan={10} message="No purchase orders found" />
                 )}
@@ -118,6 +144,7 @@ function PurchaseOrderContent() {
             </table>
           </div>
         </div>
+        <p className="mt-2 text-right text-xs text-[#999]">Loaded {purchaseOrders.length} of {total} purchase orders</p>
       </div>
 
       {showModal && (
@@ -146,7 +173,7 @@ function PurchaseOrderContent() {
 
 function PurchaseOrderView() {
   return (
-    <Suspense fallback={<div className="p-6 text-center text-[#999]">Loading...</div>}>
+    <Suspense fallback={<div className="p-6"><PageSkeleton /></div>}>
       <PurchaseOrderContent />
     </Suspense>
   );

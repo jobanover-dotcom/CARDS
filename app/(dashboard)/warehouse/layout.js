@@ -55,7 +55,7 @@ function WarehouseLayout({ children }) {
   return (
     <WarehouseDataProvider>
       <div className="flex h-screen bg-[#f5f5f5] w-full max-md:flex-col font-sans">
-        <Sidebar menuItems={warehouseMenuItems} logo={warehouseLogo} badge="Warehouse" />
+        <Sidebar menuItems={warehouseMenuItems} logo={warehouseLogo} />
         <div className="flex-1 overflow-y-auto p-8 max-md:p-4">
           {children}
         </div>

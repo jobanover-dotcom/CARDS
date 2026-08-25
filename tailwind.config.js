@@ -15,7 +15,8 @@ module.exports = {
       },
       animation: {
         'fade-in': 'fadeIn 0.25s ease-out',
-        'slide-in': 'slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+        'slide-in': 'slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+        shimmer: 'shimmer 1.4s linear infinite'
       },
       keyframes: {
         fadeIn: {
@@ -25,6 +26,9 @@ module.exports = {
         slideIn: {
           'from': { transform: 'translateY(12px)', opacity: '0' },
           'to': { transform: 'translateY(0)', opacity: '1' }
+        },
+        shimmer: {
+          '100%': { transform: 'translateX(100%)' }
         }
       }
     },

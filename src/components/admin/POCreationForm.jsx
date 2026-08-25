@@ -12,6 +12,7 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const [formPoDate, setFormPoDate] = useState('');
   const [formItemDescription, setFormItemDescription] = useState(initialData?.itemDescription || '');
   const [formQty, setFormQty] = useState(initialData?.qty || '');
+  const [requestedQty, setRequestedQty] = useState(initialData?.requestedQty || '');
   const [formUnit, setFormUnit] = useState(initialData?.unit || 'pcs');
   const [formNotes, setFormNotes] = useState('');
   const [formApprovedBy, setFormApprovedBy] = useState(initialData?.approvedBy || '');
@@ -22,7 +23,10 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const [formPlateNumber, setFormPlateNumber] = useState('');
   const [formSupplierName, setFormSupplierName] = useState('');
   const [formSupplierAddress, setFormSupplierAddress] = useState('');
-  const [formWarehouse, setFormWarehouse] = useState(user?.warehouse || (warehouses.length > 0 ? warehouses[0] : ''));
+  const fromRequest = !!(initialData?.sourceReqNumber && initialData?.sourceRequestWarehouse);
+  const [formWarehouse, setFormWarehouse] = useState(
+    initialData?.sourceRequestWarehouse || user?.warehouse || (warehouses.length > 0 ? warehouses[0] : '')
+  );
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -53,7 +57,11 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
       poType: 'active-delivery'
     };
 
-    createPO(newPO);
+    const source = initialData?.sourceReqNumber
+      ? { reqNumber: initialData.sourceReqNumber, approvedQty: parseInt(formQty) || 0 }
+      : null;
+
+    createPO(newPO, source);
     onClose();
     onSuccess();
   };
@@ -94,7 +102,12 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
               <input type="text" value={formItemDescription} onChange={(e) => setFormItemDescription(e.target.value)} placeholder="Enter description" required className={inputClass} />
             </div>
             <div className="flex flex-col gap-1.5 text-left flex-[0.8]">
-              <label className={labelClass}>QTY <span className="text-[#d32f2f] ml-0.5">*</span></label>
+              <label className={labelClass}>
+                QTY <span className="text-[#d32f2f] ml-0.5">*</span>
+                {requestedQty && parseInt(formQty) !== parseInt(requestedQty) && (
+                  <span className="font-normal text-[#f57c00]"> (requested: {requestedQty})</span>
+                )}
+              </label>
               <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="0" required className={inputClass} />
             </div>
             <div className="flex flex-col gap-1.5 text-left flex-[1]">
@@ -115,13 +128,27 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
           </div>
 
           <div className="flex flex-col gap-1.5 text-left w-full">
-            <label className={labelClass}>WAREHOUSE <span className="text-[#d32f2f] ml-0.5">*</span></label>
-            <select value={formWarehouse} onChange={(e) => setFormWarehouse(e.target.value)} required className={inputClass}>
-              <option value="" disabled>Select warehouse</option>
-              {warehouses.map((w) => (
-                <option key={w} value={w}>{w}</option>
-              ))}
-            </select>
+            <label className={labelClass}>
+              {fromRequest ? 'WAREHOUSE (REQUISITIONER)' : 'WAREHOUSE'} <span className="text-[#d32f2f] ml-0.5">*</span>
+            </label>
+            {fromRequest ? (
+              <input
+                type="text"
+                value={formWarehouse}
+                readOnly
+                className={`${inputClass} bg-gray-100 text-[#666] cursor-not-allowed`}
+              />
+            ) : (
+              <select value={formWarehouse} onChange={(e) => setFormWarehouse(e.target.value)} required className={inputClass}>
+                <option value="" disabled>Select warehouse</option>
+                {warehouses.map((w) => (
+                  <option key={w} value={w}>{w}</option>
+                ))}
+              </select>
+            )}
+            {fromRequest && (
+              <p className="m-0 text-[11px] text-[#999]">Auto-filled from the source warehouse request — no selection needed.</p>
+            )}
           </div>
 
           <div className="text-[11px] font-bold text-[#888] tracking-widest mt-3 mb-1 border-b border-[#f0f0f0] pb-1 uppercase text-left">APPROVAL & PICK UP</div>

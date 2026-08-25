@@ -1,13 +1,19 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import StatusBadge from '../ui/StatusBadge';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
+import PageSkeleton from '../ui/PageSkeleton';
+import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
+import { getPOs } from '../../../actions/pos';
+import { getRequests } from '../../../actions/requests';
+import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function HistoryView() {
-  const { purchaseOrders, warehouseRequests } = useAdminData();
+  const { stats, requestCounts, poVersion, requestVersion } = useAdminData();
   const [historyTab, setHistoryTab] = useState('purchase-orders');
+  const [historySearchInput, setHistorySearchInput] = useState('');
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
   const [appliedFilters, setAppliedFilters] = useState({
@@ -19,6 +25,31 @@ function HistoryView() {
   const [showRemarksModal, setShowRemarksModal] = useState(false);
   const [remarksToDisplay, setRemarksToDisplay] = useState('');
 
+  useEffect(() => {
+    const t = setTimeout(() => setHistorySearchQuery(historySearchInput), 300);
+    return () => clearTimeout(t);
+  }, [historySearchInput]);
+
+  const isPOsTab = historyTab === 'purchase-orders';
+
+  const poQueryParams = useMemo(() => ({
+    status: appliedFilters.completed ? 'completed' : appliedFilters.incomplete ? 'incomplete' : undefined,
+    poType: appliedFilters.activeDelivery ? 'active-delivery' : undefined,
+    inProcess: appliedFilters.inProcess || undefined,
+    search: historySearchQuery || undefined,
+  }), [appliedFilters, historySearchQuery]);
+
+  const reqQueryParams = useMemo(() => ({
+    status: appliedFilters.pending ? 'Pending' : appliedFilters.approved ? 'Approved' : appliedFilters.rejected ? 'Rejected' : undefined,
+    search: historySearchQuery || undefined,
+  }), [appliedFilters, historySearchQuery]);
+
+  const poList = useInfiniteRows(getPOs, poQueryParams, poVersion);
+  const reqList = useInfiniteRows(getRequests, reqQueryParams, requestVersion);
+
+  const activeList = isPOsTab ? poList : reqList;
+  const { rows: loadedRows, total, initialLoading, loadingMore, hasMore, loadMore } = activeList;
+
   const handleOpenReceipt = (po) => {
     setSelectedReceiptPo(po);
     setShowReceiptModal(true);
@@ -29,34 +60,17 @@ function HistoryView() {
     setShowRemarksModal(true);
   };
 
-  let filteredHistoryPOs = purchaseOrders.filter(order => {
-    if (historySearchQuery && !order.poNumber.includes(historySearchQuery) && !order.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase())) return false;
-    const poFilters = ['completed', 'incomplete', 'activeDelivery', 'inProcess'];
-    const activeCount = poFilters.filter(k => appliedFilters[k]).length;
-    if (activeCount > 0) {
-      let match = false;
-      if (appliedFilters.activeDelivery && order.poType === 'active-delivery') match = true;
-      if (appliedFilters.inProcess && order.status === 'incomplete' && order.poType === 'active-delivery') match = true;
-      if (appliedFilters.incomplete && order.status === 'incomplete') match = true;
-      if (appliedFilters.completed && order.status === 'completed') match = true;
-      if (!match) return false;
-    }
-    return true;
-  });
-
-  let filteredHistoryReqs = warehouseRequests.filter(req => {
-    if (historySearchQuery && !req.mrsNo.includes(historySearchQuery) && !req.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase())) return false;
-    const reqFilters = ['approved', 'pending', 'rejected'];
-    const activeCount = reqFilters.filter(k => appliedFilters[k]).length;
-    if (activeCount > 0) {
-      let match = false;
-      if (appliedFilters.pending && req.status === 'Pending') match = true;
-      if (appliedFilters.approved && req.status === 'Approved') match = true;
-      if (appliedFilters.rejected && req.status === 'Rejected') match = true;
-      if (!match) return false;
-    }
-    return true;
-  });
+  if (initialLoading) {
+    return (
+      <div className="flex flex-col gap-6 w-full text-slate-800">
+        <div className="mb-2 text-left">
+          <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">HISTORY</h1>
+          <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Records and monitors all past purchase orders</p>
+        </div>
+        <PageSkeleton statCards={2} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6 w-full text-slate-800">
@@ -75,7 +89,7 @@ function HistoryView() {
           onClick={() => { setHistoryTab('purchase-orders'); setHistorySearchQuery(''); }}
         >
           <div className="text-base font-semibold text-slate-700 mb-2">Purchase Orders</div>
-          <div className="text-5xl font-extrabold text-[#1e3c72]">{purchaseOrders.length}</div>
+          <div className="text-5xl font-extrabold text-[#1e3c72]">{stats.totalPOs}</div>
           <div className="text-xs text-slate-500 mt-4">All purchase orders</div>
         </div>
 
@@ -88,7 +102,7 @@ function HistoryView() {
           onClick={() => { setHistoryTab('warehouse-requests'); setHistorySearchQuery(''); }}
         >
           <div className="text-base font-semibold text-slate-700 mb-2">Warehouse Requests</div>
-          <div className="text-5xl font-extrabold text-[#2e7d32]">{warehouseRequests.length}</div>
+          <div className="text-5xl font-extrabold text-[#2e7d32]">{requestCounts.total}</div>
           <div className="text-xs text-slate-500 mt-4">All warehouse requests</div>
         </div>
       </div>
@@ -114,8 +128,8 @@ function HistoryView() {
                   type="text"
                   placeholder="Search MRS #..."
                   className="w-full pl-9 pr-4 py-2.5 border border-gray-300 rounded-lg text-[13px] placeholder:text-[#999] focus:outline-none focus:border-[#7ec8e3] focus:ring-2 focus:ring-[#7ec8e3]/10 transition-all duration-200"
-                  value={historySearchQuery}
-                  onChange={(e) => setHistorySearchQuery(e.target.value)}
+                  value={historySearchInput}
+                  onChange={(e) => setHistorySearchInput(e.target.value)}
                 />
               </div>
 
@@ -162,25 +176,28 @@ function HistoryView() {
                 </tr>
               </thead>
               <tbody>
-                {filteredHistoryPOs.length > 0 ? (
-                  filteredHistoryPOs.map((order, index) => (
-                    <tr key={index} onClick={() => handleOpenReceipt(order)}
-                      className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-[#e8f5e9]' : 'bg-[#c8e6c9]'} hover:bg-[#f0f8fc]/50`}>
-                      <td className="p-4 text-[#333] font-medium">{order.date}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.poNumber}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.qty}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.unit}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.mrsNo || '676767'}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.poExpDate || '12'}</td>
-                      <td className="p-4 text-[#333] font-medium">{order.pickupBy || 'John Doe'}</td>
-                      <td className="p-4">
-                        <StatusBadge status={order.status === 'completed' ? 'Completed' : 'Open'} />
-                      </td>
-                    </tr>
-                  ))
+                {poList.rows.length > 0 ? (
+                  <>
+                    {poList.rows.map((order, index) => (
+                      <tr key={index} onClick={() => handleOpenReceipt(order)}
+                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-[#e8f5e9]' : 'bg-[#c8e6c9]'} hover:bg-[#f0f8fc]/50`}>
+                        <td className="p-4 text-[#333] font-medium">{order.date}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.poNumber}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.qty}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.mrsNo || '676767'}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.poExpDate || '12'}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.pickupBy || 'John Doe'}</td>
+                        <td className="p-4">
+                          <StatusBadge status={order.status === 'completed' ? 'Completed' : 'Open'} />
+                        </td>
+                      </tr>
+                    ))}
+                    <TableScrollSentinel colSpan={11} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  </>
                 ) : (
                   <EmptyState colSpan={11} message="No purchase orders found" />
                 )}
@@ -192,35 +209,47 @@ function HistoryView() {
             <table className="w-full min-w-[900px] border-collapse text-[13px]">
               <thead className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] sticky top-0 z-20">
                 <tr>
-                  {['Request Date', 'MRS #', 'Item Description', 'Qty', 'Unit', 'MRS No.', 'Requested By', 'Requisitioner', 'Status'].map((h, i) => (
+                  {['Request Date', 'MRS #', 'Item Description', 'Qty', 'Unit', 'MRS No.', 'Requested By', 'Requisitioner', 'Approved / Balance', 'Status'].map((h, i) => (
                     <th key={i} className="p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {filteredHistoryReqs.length > 0 ? (
-                  filteredHistoryReqs.map((req, index) => (
-                    <tr key={index}
-                      className={`border-b border-gray-200 transition-colors duration-150 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50 ${req.status === 'Rejected' ? 'cursor-pointer' : ''}`}
-                      onClick={() => { if (req.status === 'Rejected') handleViewRejectedRemarks(req); }}>
-                      <td className="p-4 text-[#333] font-medium">{req.date}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.qty}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.unit}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
-                      <td className="p-4 text-[#333] font-medium">{req.requisitioner}</td>
-                      <td className="p-4"><StatusBadge status={req.status} /></td>
-                    </tr>
-                  ))
+                {reqList.rows.length > 0 ? (
+                  <>
+                    {reqList.rows.map((req, index) => {
+                      const balance = req.approvedQty != null ? Math.max(0, req.qty - req.approvedQty) : null;
+                      return (
+                        <tr key={index}
+                          className={`border-b border-gray-200 transition-colors duration-150 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50 ${req.status === 'Rejected' ? 'cursor-pointer' : ''}`}
+                          onClick={() => { if (req.status === 'Rejected') handleViewRejectedRemarks(req); }}>
+                          <td className="p-4 text-[#333] font-medium">{req.date}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.qty}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.unit}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
+                          <td className="p-4 text-[#333] font-medium">{req.requisitioner}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
+                            {balance == null ? '—' : `${req.approvedQty} / ${req.qty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                          </td>
+                          <td className="p-4"><StatusBadge status={req.status} /></td>
+                        </tr>
+                      );
+                    })}
+                    <TableScrollSentinel colSpan={10} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  </>
                 ) : (
-                  <EmptyState colSpan={9} message="No requests found" />
+                  <EmptyState colSpan={10} message="No requests found" />
                 )}
               </tbody>
             </table>
           </div>
         )}
+        <div className="px-4 py-2 border-t border-gray-100">
+          <p className="m-0 text-right text-xs text-[#999]">Loaded {loadedRows.length} of {total} {isPOsTab ? 'purchase orders' : 'requests'}</p>
+        </div>
       </div>
 
       {showReceiptModal && selectedReceiptPo && (

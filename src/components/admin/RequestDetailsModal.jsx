@@ -8,6 +8,11 @@ function RequestDetailsModal({ request, onClose }) {
   const { approveRequest, declineRequest } = useAdminData();
   const [isDeclineMode, setIsDeclineMode] = useState(false);
   const [declineRemarks, setDeclineRemarks] = useState('');
+  const [approvedQty, setApprovedQty] = useState(request.qty);
+
+  const parsedApprovedQty = parseInt(approvedQty) || 0;
+  const isPartial = parsedApprovedQty > 0 && parsedApprovedQty < request.qty;
+  const balance = Math.max(0, request.qty - parsedApprovedQty);
 
   const handleDeclineClick = () => setIsDeclineMode(true);
 
@@ -18,14 +23,21 @@ function RequestDetailsModal({ request, onClose }) {
   };
 
   const handleProceedPO = () => {
+    if (parsedApprovedQty < 1 || parsedApprovedQty > request.qty) {
+      alert(`Approved qty must be between 1 and ${request.qty}`);
+      return;
+    }
     onClose();
     const params = new URLSearchParams({
       openPOModal: 'true',
       itemDescription: request.itemDescription,
-      qty: request.qty.toString(),
+      requestedQty: request.qty.toString(),
+      qty: parsedApprovedQty.toString(),
       unit: request.unit,
       requisitioner: request.requisitioner,
       mrsNo: request.mrsNo,
+      reqNumber: request.reqNumber,
+      requestWarehouse: (request.warehouse || request.requisitioner || '').toString(),
       approvedBy: request.requestedBy,
       approvalDate: request.date,
     });
@@ -49,9 +61,28 @@ function RequestDetailsModal({ request, onClose }) {
               <input type="text" value={request.itemDescription} disabled className={inputClass} />
             </div>
             <div className="flex flex-col gap-1.5 text-left">
-              <label className="text-[11px] font-bold text-[#666]">QTY</label>
+              <label className="text-[11px] font-bold text-[#666]">REQUESTED QTY</label>
               <input type="text" value={request.qty} disabled className={inputClass} />
             </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5 text-left">
+            <label className="text-[11px] font-bold text-[#444]">
+              APPROVED QTY <span className="font-normal text-[#999]">(max {request.qty})</span>
+            </label>
+            <input
+              type="number"
+              min="1"
+              max={request.qty}
+              value={approvedQty}
+              onChange={(e) => setApprovedQty(e.target.value)}
+              className={inputClass}
+            />
+            {isPartial && (
+              <p className="m-0 text-xs text-[#f57c00] font-semibold">
+                Partial approval — balance of {balance} {request.unit} will remain for the warehouse to file a follow-up.
+              </p>
+            )}
           </div>
 
           <div className="flex gap-4">
@@ -90,7 +121,9 @@ function RequestDetailsModal({ request, onClose }) {
             {!isDeclineMode ? (
               <>
                 <button type="button" className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-white text-[#d32f2f] border border-[#d32f2f] hover:bg-[#fff5f5]" onClick={handleDeclineClick}>Decline</button>
-                <button type="button" className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-[#006680] text-white border-none hover:bg-[#004d60]" onClick={handleProceedPO}>Proceed PO</button>
+                <button type="button" className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-[#006680] text-white border-none hover:bg-[#004d60]" onClick={handleProceedPO}>
+                  {isPartial ? 'Proceed PO (Partial)' : 'Proceed PO'}
+                </button>
               </>
             ) : (
               <>

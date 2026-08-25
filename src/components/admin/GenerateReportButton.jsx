@@ -117,24 +117,33 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
   XLSX.writeFile(wb, `Purchase_Order_Report_${ts}.xlsx`);
 }
 
-function GenerateReportButton({ filteredOrders, totalPOs, completedPOs, incompletePOs, showActiveDeliveryOption }) {
+function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [includeActiveDelivery, setIncludeActiveDelivery] = useState(true);
+  const [generating, setGenerating] = useState(false);
 
   const handleButtonClick = () => {
     setIncludeActiveDelivery(true);
     setShowConfirmModal(true);
   };
 
-  const handleProceed = () => {
-    const finalOrders = showActiveDeliveryOption && !includeActiveDelivery
-      ? filteredOrders.filter(o => o.poType !== 'active-delivery')
-      : filteredOrders;
-    const finalTotal = finalOrders.length;
-    const finalCompleted = finalOrders.filter(o => o.status === 'completed').length;
-    const finalIncomplete = finalOrders.filter(o => o.status === 'incomplete').length;
-    generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete);
-    setShowConfirmModal(false);
+  const handleProceed = async () => {
+    setGenerating(true);
+    try {
+      const allMatching = await fetchReportData();
+      const finalOrders = showActiveDeliveryOption && !includeActiveDelivery
+        ? allMatching.filter(o => o.poType !== 'active-delivery')
+        : allMatching;
+      const finalTotal = finalOrders.length;
+      const finalCompleted = finalOrders.filter(o => o.status === 'completed').length;
+      const finalIncomplete = finalOrders.filter(o => o.status === 'incomplete').length;
+      generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete);
+      setShowConfirmModal(false);
+    } catch (e) {
+      alert('Failed to generate report: ' + e.message);
+    } finally {
+      setGenerating(false);
+    }
   };
 
   return (
@@ -173,9 +182,10 @@ function GenerateReportButton({ filteredOrders, totalPOs, completedPOs, incomple
               </button>
               <button
                 onClick={handleProceed}
-                className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 bg-[#1e3c72] text-white border-none hover:bg-[#2a5298]"
+                disabled={generating}
+                className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 bg-[#1e3c72] text-white border-none hover:bg-[#2a5298] disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Proceed
+                {generating ? 'Generating...' : 'Proceed'}
               </button>
             </div>
           </div>

@@ -5,8 +5,14 @@ import { createAdminSupabase } from '@/lib/supabase-server';
 
 const EMAIL_DOMAIN = '@cards.app';
 
-export async function getUsers() {
-  return prisma.profile.findMany({ orderBy: { createdAt: 'asc' } });
+export async function getUsers({ offset = 0, limit = 10, search }: { offset?: number; limit?: number; search?: string } = {}) {
+  const where: Record<string, unknown> = {};
+  if (search) where.name = { contains: search, mode: 'insensitive' };
+  const [rows, total] = await prisma.$transaction([
+    prisma.profile.findMany({ where, orderBy: { createdAt: 'asc' }, skip: offset, take: limit }),
+    prisma.profile.count({ where }),
+  ]);
+  return { rows, total };
 }
 
 export async function addUser(data: {

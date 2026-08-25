@@ -1,57 +1,56 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getPOs, getPOStats, updatePO as updatePOServer } from '../../actions/pos';
-import { getRequests, createRequest as createRequestServer } from '../../actions/requests';
+import { getPOStats, updatePO as updatePOServer } from '../../actions/pos';
+import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
 
 export function WarehouseDataProvider({ children }) {
-  const [purchaseOrders, setPurchaseOrders] = useState([]);
-  const [requestsList, setRequestsList] = useState([]);
+  const [stats, setStats] = useState({
+    totalPOs: 0, completedPOs: 0, incompletePOs: 0,
+    activeDeliveryCount: 0, discrepancyCount: 0,
+  });
   const [loading, setLoading] = useState(true);
-  const [completedCount, setCompletedCount] = useState(0);
-  const [activeCount, setActiveCount] = useState(0);
+  const [poVersion, setPoVersion] = useState(0);
+  const [requestVersion, setRequestVersion] = useState(0);
 
-  const refresh = useCallback(async () => {
+  const refreshStats = useCallback(async () => {
     try {
-      const [pos, reqs] = await Promise.all([
-        getPOs(),
-        getRequests(),
-      ]);
-      setPurchaseOrders(pos);
-      setRequestsList(reqs);
-      setCompletedCount(pos.filter(o => o.status === 'completed').length);
-      setActiveCount(pos.filter(o => o.status === 'incomplete' && o.poType === 'active-delivery').length);
+      setStats(await getPOStats());
     } catch (e) {
-      console.error('Failed to load warehouse data', e);
-    } finally {
-      setLoading(false);
+      console.error('Failed to load stats', e);
     }
   }, []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let cancelled = false;
+    (async () => {
+      await refreshStats();
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [refreshStats]);
 
   const updatePO = useCallback(async (poNumber, data) => {
-    const updated = await updatePOServer(poNumber, data);
-    setPurchaseOrders(prev => prev.map(po => po.poNumber === poNumber ? { ...po, ...updated } : po));
-    const stats = await getPOStats();
-    setCompletedCount(pos => (data.status === 'completed' ? pos + 1 : pos));
-    setActiveCount(pos => (data.status === 'completed' ? Math.max(0, pos - 1) : pos));
-  }, []);
+    await updatePOServer(poNumber, data);
+    setPoVersion(v => v + 1);
+    await refreshStats();
+  }, [refreshStats]);
 
   const createRequest = useCallback(async (data) => {
-    const req = await createRequestServer(data);
-    setRequestsList(prev => [req, ...prev]);
+    await createRequestServer(data);
+    setRequestVersion(v => v + 1);
   }, []);
 
   return (
     <WarehouseDataContext.Provider value={{
-      purchaseOrders, setPurchaseOrders,
-      requestsList, setRequestsList,
+      stats,
       loading,
-      completedCount, activeCount,
+      poVersion,
+      requestVersion,
+      completedCount: stats.completedPOs,
+      activeCount: stats.activeDeliveryIncompleteCount,
+      refreshStats,
       updatePO, createRequest,
     }}>
       {children}
