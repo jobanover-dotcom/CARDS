@@ -1,11 +1,11 @@
 'use client';
+import { useAuth } from '../../src/context/AuthContext';
+import LoginForm from '../../src/components/auth/LoginForm';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '../src/context/AuthContext';
-import PageSkeleton from '../src/components/ui/PageSkeleton';
 
-function Home() {
-  const { isLoggedIn, user, loading } = useAuth();
+function LoginPage() {
+  const { isLoggedIn, user, loading, login } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -20,16 +20,14 @@ function Home() {
       } else {
         router.replace('/login');
       }
-    } else {
-      router.replace('/login');
     }
   }, [loading, isLoggedIn, user, router]);
 
   return (
-    <div className="w-full h-full min-h-screen bg-slate-100 p-8 max-md:p-4">
-      <PageSkeleton />
+    <div className="w-full h-full min-h-screen bg-slate-100 text-slate-800">
+      {loading ? null : (!isLoggedIn || !user ? <LoginForm onLogin={login} /> : null)}
     </div>
   );
 }
 
-export default Home;
+export default LoginPage;

@@ -12,7 +12,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'John Doe',
     status: 'incomplete',
     poType: 'active-delivery',
-    statusLabel: 'Open'
+    statusLabel: 'Open',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Bajada Warehouse'
   },
   {
     date: '01-21-25',
@@ -27,7 +33,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'John Doe',
     status: 'incomplete',
     poType: 'active-delivery',
-    statusLabel: 'Active Delivery'
+    statusLabel: 'Active Delivery',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Bajada Warehouse'
   },
   {
     date: '01-22-25',
@@ -42,7 +54,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'John Doe',
     status: 'incomplete',
     poType: 'active-delivery',
-    statusLabel: 'In process'
+    statusLabel: 'In process',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Tagum Warehouse'
   },
   {
     date: '01-23-25',
@@ -57,7 +75,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Jane Smith',
     status: 'incomplete',
     poType: 'active-delivery',
-    statusLabel: 'Completed'
+    statusLabel: 'Completed',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Tagum Warehouse'
   },
   {
     date: '01-25-25',
@@ -72,7 +96,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Bob Johnson',
     status: 'incomplete',
     poType: 'discrepancy',
-    statusLabel: 'Incomplete-Open'
+    statusLabel: 'Incomplete-Open',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Bajada Warehouse'
   },
   {
     date: '01-26-25',
@@ -87,7 +117,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Charlie Brown',
     status: 'incomplete',
     poType: 'discrepancy',
-    statusLabel: 'Open'
+    statusLabel: 'Open',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Bajada Warehouse'
   },
   {
     date: '01-27-25',
@@ -102,7 +138,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Dave Wilson',
     status: 'incomplete',
     poType: 'discrepancy',
-    statusLabel: 'Active Delivery'
+    statusLabel: 'Active Delivery',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Tagum Warehouse'
   },
   {
     date: '01-10-25',
@@ -117,7 +159,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Frank Miller',
     status: 'completed',
     poType: 'completed',
-    statusLabel: 'Completed'
+    statusLabel: 'Completed',
+    monQtyRvd: '500',
+    monDeliveredBy: 'Frank Miller',
+    monDateDelivered: '01-20-25',
+    monReferenceNo: 'DR-7488640',
+    monDrDate: '01-10-25',
+    warehouse: 'Bajada Warehouse'
   },
   {
     date: '01-12-25',
@@ -132,7 +180,13 @@ const MOCK_PURCHASE_ORDERS = [
     pickupBy: 'Grace Lee',
     status: 'completed',
     poType: 'completed',
-    statusLabel: 'Open'
+    statusLabel: 'Open',
+    monQtyRvd: '30',
+    monDeliveredBy: 'Grace Lee',
+    monDateDelivered: '01-22-25',
+    monReferenceNo: 'DR-7488641',
+    monDrDate: '01-12-25',
+    warehouse: 'Tagum Warehouse'
   },
   {
     date: '01-15-25',
@@ -145,9 +199,78 @@ const MOCK_PURCHASE_ORDERS = [
     mrsNo: 'MRS-100',
     poExpDate: '01-25-25',
     pickupBy: 'Henry Davis',
+    status: 'incomplete',
+    poType: 'discrepancy',
+    statusLabel: 'Incomplete-Open',
+    monQtyRvd: '9',
+    monDeliveredBy: 'Henry Davis',
+    monDateDelivered: '01-25-25',
+    monReferenceNo: 'DR-7488642',
+    monDrDate: '01-15-25',
+    warehouse: 'Bajada Warehouse'
+  },
+  {
+    date: '02-01-25',
+    poNumber: '7488655',
+    itemDescription: 'PVC Pipes 4in',
+    qty: 100,
+    unit: 'pcs',
+    supplier: 'Davao Pipe Supply',
+    requisitioner: 'Tagum Ace',
+    mrsNo: 'MRS-107',
+    poExpDate: '02-20-25',
+    pickupBy: 'Maria Santos',
+    status: 'incomplete',
+    poType: 'active-delivery',
+    statusLabel: 'Open',
+    monQtyRvd: '',
+    monDeliveredBy: '',
+    monDateDelivered: '',
+    monReferenceNo: '',
+    monDrDate: '',
+    warehouse: 'Davao Warehouse'
+  },
+  {
+    date: '02-05-25',
+    poNumber: '7488656',
+    itemDescription: 'Paint Latex White',
+    qty: 25,
+    unit: 'gal',
+    supplier: 'Davao Paint Center',
+    requisitioner: 'Tagum Ace',
+    mrsNo: 'MRS-108',
+    poExpDate: '02-28-25',
+    pickupBy: 'Juan Dela Cruz',
     status: 'completed',
     poType: 'completed',
-    statusLabel: 'Active Delivery'
+    statusLabel: 'Completed',
+    monQtyRvd: '25',
+    monDeliveredBy: 'Juan Dela Cruz',
+    monDateDelivered: '02-15-25',
+    monReferenceNo: 'DR-7488656',
+    monDrDate: '02-05-25',
+    warehouse: 'Davao Warehouse'
+  },
+  {
+    date: '02-10-25',
+    poNumber: '7488657',
+    itemDescription: 'Steel Bars 16mm',
+    qty: 60,
+    unit: 'pcs',
+    supplier: 'Tagum Steel Corp',
+    requisitioner: 'Tagum Ace',
+    mrsNo: 'MRS-109',
+    poExpDate: '03-05-25',
+    pickupBy: 'Pedro Reyes',
+    status: 'incomplete',
+    poType: 'discrepancy',
+    statusLabel: 'Incomplete-Open',
+    monQtyRvd: '55',
+    monDeliveredBy: 'Pedro Reyes',
+    monDateDelivered: '03-01-25',
+    monReferenceNo: 'DR-7488657',
+    monDrDate: '02-10-25',
+    warehouse: 'Bajada Warehouse'
   }
 ];
 
@@ -227,9 +350,11 @@ const MOCK_WAREHOUSE_REQUESTS = [
 ];
 
 const MOCK_WAREHOUSE_USERS = [
-  { id: 1, name: 'John Doe', email: 'john.doe@example.com', warehouse: 'Bajada Warehouse' },
-  { id: 2, name: 'Jane Smith', email: 'jane.smith@example.com', warehouse: 'Tagum Warehouse' },
-  { id: 3, name: 'Bob Johnson', email: 'bob.johnson@example.com', warehouse: 'Bajada Warehouse' },
+  { id: 1, name: 'John Doe', username: 'johndoe', warehouse: 'Bajada Warehouse', role: 'Warehouse' },
+  { id: 2, name: 'Jane Smith', username: 'janesmith', warehouse: 'Tagum Warehouse', role: 'Warehouse' },
+  { id: 3, name: 'Bob Johnson', username: 'bobjohnson', warehouse: 'Bajada Warehouse', role: 'Warehouse' },
+  { id: 4, name: 'Warehouse Staff 1', username: 'warehouse1', warehouse: 'Bajada Warehouse', role: 'Warehouse' },
+  { id: 5, name: 'Purchaser User', username: 'purchaser1', warehouse: null, role: 'Admin' },
 ];
 
 export function getPurchaseOrders() {
@@ -254,4 +379,42 @@ export function updateRequestStatus(reqMrsNo, status, remarks) {
 
 export function getMockWarehouses() {
   return ['Bajada Warehouse', 'Tagum Warehouse'];
+}
+
+let MOCK_AUTH_USERS = [
+  { userId: 'USR-001', username: 'superadmin', password: '12345678', role: 'Superadmin', name: 'Super Admin' },
+  { userId: 'USR-002', username: 'warehouse1', password: '12345678', role: 'Warehouse', warehouse: 'Bajada Warehouse', name: 'Warehouse Staff 1' },
+  { userId: 'USR-003', username: 'purchaser1', password: '12345678', role: 'Admin', name: 'Purchaser User' },
+];
+
+export function getAuthUsers() {
+  return MOCK_AUTH_USERS;
+}
+
+export function addAuthUser(user) {
+  MOCK_AUTH_USERS.push(user);
+  return user;
+}
+
+export function updateAuthUserPassword(username, newPassword) {
+  const idx = MOCK_AUTH_USERS.findIndex(u => u.username === username);
+  if (idx === -1) return null;
+  MOCK_AUTH_USERS[idx].password = newPassword;
+  return MOCK_AUTH_USERS[idx];
+}
+
+export function removeAuthUser(username) {
+  const idx = MOCK_AUTH_USERS.findIndex(u => u.username === username);
+  if (idx === -1) return false;
+  MOCK_AUTH_USERS.splice(idx, 1);
+  return true;
+}
+
+export function getNextUserId() {
+  let max = 2999;
+  for (const u of MOCK_AUTH_USERS) {
+    const num = parseInt(u.userId?.replace('USR-', '') || '0', 10);
+    if (num > max) max = num;
+  }
+  return 'USR-' + (max + 1);
 }
