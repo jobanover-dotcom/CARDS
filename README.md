@@ -1,70 +1,56 @@
-# Getting Started with Create React App
+# CARDS — Construction Material Requisition & Delivery System
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+CARWILL Construction's internal system for warehouse material requests, purchase orders, delivery monitoring, and archiving.
 
-## Available Scripts
+**Stack:** Next.js 15 (App Router) · React 19 · Prisma 7 (`@prisma/adapter-pg`) · Supabase (PostgreSQL + Auth) · Tailwind CSS
 
-In the project directory, you can run:
+## Features
 
-### `npm start`
+- **Role-based access** — Superadmin, Purchaser (Admin), Warehouse
+- **Requests** — warehouses file material requests; purchasers approve fully or partially; partial approvals leave a balance the warehouse can follow up as a separate request/PO
+- **Purchase Orders** — created from approved requests or manually; active-delivery and discrepancy tracking with warehouse monitoring fields
+- **Dashboard & History** — stat cards, filtering, Excel report generation
+- **Infinite scroll** — every table loads 10 rows at a time server-side (Prisma `skip/take` + `count`), with skeleton loading
+- **Archive** — deleted warehouses and system resets snapshot all data; restore (skip-duplicates) or download as Excel anytime
+- **System Reset** — superadmin-only yearly/month clearing; archives per-warehouse data then wipes POs + requests
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## Getting Started (local)
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Requirements: Node 20+, npm.
 
-### `npm test`
+```bash
+git clone https://github.com/jobanover-dotcom/CARDS.git
+cd CARDS
+npm install                # runs prisma generate automatically (postinstall)
+cp .env.example .env       # fill in your Supabase credentials
+npx prisma migrate deploy  # apply database migrations
+npm run dev                # http://localhost:3000
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+All PCs connect to the same Supabase database — data is shared automatically.
 
-### `npm run build`
+## Deployment (Vercel)
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+1. Push this repo to GitHub (already done).
+2. On [vercel.com](https://vercel.com): **Add New → Project → Import** this repository.
+3. Framework preset auto-detects **Next.js** — keep defaults.
+4. Add Environment Variables (values from your Supabase dashboard / `.env`):
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+   - `DATABASE_URL`
+5. Recommended: set the project region close to your Supabase instance (e.g. Tokyo for `ap-northeast-1`).
+6. Deploy.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Useful Scripts
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Development server |
+| `npm run build` | Production build |
+| `npm start` | Serve production build |
+| `npx prisma migrate deploy` | Apply pending DB migrations |
 
-### `npm run eject`
+## Default Logins
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Seeded via `prisma/seed.mjs` — see that file for test credentials.
