@@ -29,7 +29,7 @@ function LoginForm({ onLogin }) {
       <div className="absolute inset-0 bg-[#1e3c72]/25"></div>
       <div className="bg-white/75 backdrop-blur-md rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.3)] p-10 max-sm:p-6 w-full max-w-[420px] max-sm:max-w-[90%] z-10 relative mr-16 max-sm:mr-0">
         <div className="text-center mb-7">
-          <img src="/clogo.jpg" alt="CARWILL Construction Logo" className="max-w-[120px] h-auto mb-2.5 mx-auto object-contain" />
+          <img src="/clogo.png" alt="CARWILL Construction Logo" className="max-w-[120px] h-auto mb-2.5 mx-auto object-contain" />
         </div>
         <h1 className="text-[#1e3c72] text-3xl max-sm:text-2xl m-0 text-center font-bold tracking-widest">Welcome to CARWILL</h1>
         <h2 className="text-[#2a5298] text-3xl max-sm:text-2xl mt-0 mx-0 mb-10 text-center font-bold tracking-widest">CONSTRUCTION</h2>

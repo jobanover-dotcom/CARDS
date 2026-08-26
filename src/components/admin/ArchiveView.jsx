@@ -22,6 +22,7 @@ function ArchiveView() {
   const [monthFilter, setMonthFilter] = useState('');
 
   const [selectedEntry, setSelectedEntry] = useState(null);
+  const [showActivityLog, setShowActivityLog] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
 
@@ -135,9 +136,17 @@ function ArchiveView() {
 
   return (
     <div className="bg-white rounded-lg p-6 text-left">
-      <div className="mb-8">
-        <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Archive</h1>
-        <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Cleared and deleted warehouse records — restore or download anytime</p>
+      <div className="flex items-start justify-between mb-8 max-md:flex-col max-md:gap-4">
+        <div>
+          <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Archive</h1>
+          <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Cleared and deleted warehouse records — restore or download anytime</p>
+        </div>
+        <button
+          onClick={() => setShowActivityLog(true)}
+          className="bg-[#1e3c72] text-white border-none py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#2a5298] hover:shadow-[0_2px_8px_rgba(30,60,114,0.3)] whitespace-nowrap"
+        >
+          Activity Log
+        </button>
       </div>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
@@ -213,42 +222,57 @@ function ArchiveView() {
         </table>
       </div>
 
-      <div className="mt-8 mb-3 flex items-center justify-between">
-        <h2 className="m-0 text-lg text-[#333] font-bold">Activity History</h2>
-        <span className="text-xs text-[#999]">Permanent record — kept even after system resets</span>
-      </div>
-      <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
-        <div className="overflow-x-auto max-h-[300px]">
-          <table className="w-full min-w-[700px] border-collapse text-[13px]">
-            <thead>
-              <tr>
-                {['Date & Time', 'Warehouse', 'Action', 'Details', 'By'].map((h, i) => (
-                  <th key={i} className="bg-gradient-to-r from-[#f0f4f8] to-[#dce6f0] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {activity.length > 0 ? activity.map((a, index) => (
-                <tr key={a.id} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                  <td className="p-4 text-[#333] whitespace-nowrap">
-                    {new Date(a.createdAt).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                  </td>
-                  <td className="p-4 text-[#333] font-semibold">{a.warehouseName}</td>
-                  <td className="p-4">
-                    <span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${ACTION_BADGES[a.action] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
-                      {a.action}
-                    </span>
-                  </td>
-                  <td className="p-4 text-[#555]">{a.detail || '—'}</td>
-                  <td className="p-4 text-[#333]">{a.actor || '—'}</td>
-                </tr>
-              )) : (
-                <EmptyState colSpan={5} message="No archive activity yet" />
-              )}
-            </tbody>
-          </table>
+      {showActivityLog && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in p-4">
+          <div className="bg-white rounded-xl w-full max-w-[860px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 text-left">
+            <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-3">
+              <h2 className="m-0 text-lg font-bold text-[#333] tracking-wide">Activity Log</h2>
+              <button className="bg-none border-none text-2xl cursor-pointer text-[#888] hover:text-[#333] transition-colors duration-200 p-1 leading-none" onClick={() => setShowActivityLog(false)}>&times;</button>
+            </div>
+            <p className="mt-0 mx-0 mb-4 text-xs text-[#999]">Permanent record — kept even after system resets</p>
+            <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
+              <div className="overflow-x-auto overflow-y-auto max-h-[60vh]">
+                <table className="w-full min-w-[700px] border-collapse text-[13px]">
+                  <thead>
+                    <tr>
+                      {['Date & Time', 'Warehouse', 'Action', 'Details', 'By'].map((h, i) => (
+                        <th key={i} className="bg-gradient-to-r from-[#f0f4f8] to-[#dce6f0] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activity.length > 0 ? activity.map((a, index) => (
+                      <tr key={a.id} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                        <td className="p-4 text-[#333] whitespace-nowrap">
+                          {new Date(a.createdAt).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </td>
+                        <td className="p-4 text-[#333] font-semibold">{a.warehouseName}</td>
+                        <td className="p-4">
+                          <span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${ACTION_BADGES[a.action] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
+                            {a.action}
+                          </span>
+                        </td>
+                        <td className="p-4 text-[#555]">{a.detail || '—'}</td>
+                        <td className="p-4 text-[#333]">{a.actor || '—'}</td>
+                      </tr>
+                    )) : (
+                      <EmptyState colSpan={5} message="No archive activity yet" />
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="flex justify-end mt-5">
+              <button
+                onClick={() => setShowActivityLog(false)}
+                className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 bg-white text-[#555] border border-[#ccc] hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {selectedEntry && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in">
