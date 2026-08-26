@@ -39,6 +39,10 @@ function MonitoringDetailsForm({ po, onClose }) {
 
     const qtyReceived = parseInt(monQtyRvd) || 0;
     const originalQty = parseInt(po.qty) || 0;
+    if (qtyReceived < 1) {
+      setSaveError('Qty received must be a positive number.');
+      return;
+    }
     const isCoincided = qtyReceived === originalQty;
     const finalStatus = isCoincided ? 'completed' : 'incomplete';
     const finalPoType = isCoincided ? 'completed' : 'discrepancy';

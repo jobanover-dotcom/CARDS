@@ -26,6 +26,7 @@ function buildRequestWhere(user: { role: string; warehouse: string } | null, par
 
 export async function getRequests(params: RequestQuery = {}) {
   const user = await getCurrentUser();
+  if (!user) return { rows: [], total: 0 };
   const where = buildRequestWhere(user, params);
   const [rows, total] = await prisma.$transaction([
     prisma.warehouseRequest.findMany({
@@ -41,6 +42,7 @@ export async function getRequests(params: RequestQuery = {}) {
 
 export async function getRequestCounts() {
   const user = await getCurrentUser();
+  if (!user) return { total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0 };
   const scoped = user?.role === 'Warehouse';
   const base = scoped ? { warehouse: user.warehouse } : {};
   const [total, pending, rejected, approved, partiallyApproved] = await prisma.$transaction([
@@ -59,6 +61,10 @@ export async function createRequest(data: {
   requisitioner: string; followUpOfReqNumber?: string | null;
 }) {
   const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  if (!Number.isFinite(data.qty) || data.qty < 1) {
+    throw new Error('Quantity must be a positive number');
+  }
   return prisma.warehouseRequest.create({
     data: {
       ...data,
@@ -69,7 +75,15 @@ export async function createRequest(data: {
   });
 }
 
+async function assertElevated() {
+  const user = await getCurrentUser();
+  if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) {
+    throw new Error('Unauthorized: only purchasers and superadmins can decide requests');
+  }
+}
+
 export async function approveRequest(reqNumber: string) {
+  await assertElevated();
   const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber } });
   if (!req) throw new Error('Request not found');
   return prisma.warehouseRequest.update({
@@ -79,6 +93,7 @@ export async function approveRequest(reqNumber: string) {
 }
 
 export async function approveRequestPartial(reqNumber: string, approvedQty?: number) {
+  await assertElevated();
   const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber } });
   if (!req) throw new Error('Request not found');
   const qty = Math.max(0, Math.min(approvedQty ?? req.qty, req.qty));
@@ -92,6 +107,7 @@ export async function approveRequestPartial(reqNumber: string, approvedQty?: num
 }
 
 export async function declineRequest(reqNumber: string, remarks: string) {
+  await assertElevated();
   return prisma.warehouseRequest.update({
     where: { reqNumber },
     data: { status: 'Rejected', remarks },

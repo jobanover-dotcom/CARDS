@@ -37,6 +37,7 @@ function buildPOWhere(user: { role: string; warehouse: string } | null, params: 
 
 export async function getPOs(params: POQuery = {}) {
   const user = await getCurrentUser();
+  if (!user) return { rows: [], total: 0 };
   const where = buildPOWhere(user, params);
   const [rows, total] = await prisma.$transaction([
     prisma.purchaseOrder.findMany({
@@ -52,12 +53,19 @@ export async function getPOs(params: POQuery = {}) {
 
 export async function getReportData(params: POQuery = {}) {
   const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
   const where = buildPOWhere(user, params);
   return prisma.purchaseOrder.findMany({ where, orderBy: { createdAt: 'desc' } });
 }
 
 export async function getPOStats(warehouse?: string) {
   const user = await getCurrentUser();
+  if (!user) {
+    return {
+      totalPOs: 0, completedPOs: 0, incompletePOs: 0,
+      activeDeliveryCount: 0, discrepancyCount: 0, activeDeliveryIncompleteCount: 0,
+    };
+  }
   const scoped = user?.role === 'Warehouse';
   const base: Record<string, unknown> = {};
   if (scoped) base.warehouse = user.warehouse;
@@ -101,7 +109,16 @@ function withPoDefaults(data: CreatePOData) {
   };
 }
 
+async function assertCanManagePOs() {
+  const user = await getCurrentUser();
+  if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) {
+    throw new Error('Unauthorized: only purchasers and superadmins can create purchase orders');
+  }
+  return user;
+}
+
 export async function createPO(data: CreatePOData) {
+  await assertCanManagePOs();
   return prisma.purchaseOrder.create({ data: withPoDefaults(data) });
 }
 
@@ -109,10 +126,7 @@ export async function createPOWithApproval(
   data: CreatePOData,
   source: { reqNumber: string; approvedQty?: number }
 ) {
-  const user = await getCurrentUser();
-  if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) {
-    throw new Error('Unauthorized');
-  }
+  const user = await assertCanManagePOs();
 
   return prisma.$transaction(async (tx) => {
     const po = await tx.purchaseOrder.create({ data: withPoDefaults(data) });
@@ -134,6 +148,8 @@ export async function updatePO(poNumber: string, data: Partial<{
   monDateDelivered: string; monReferenceNo: string; monDrDate: string;
   monRemarks: string;
 }>) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
   return prisma.purchaseOrder.update({
     where: { poNumber },
     data,
