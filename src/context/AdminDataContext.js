@@ -1,6 +1,6 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getPOStats, createPO as createPOServer, updatePO as updatePOServer } from '../../actions/pos';
+import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer } from '../../actions/pos';
 import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
@@ -52,9 +52,10 @@ export function AdminDataProvider({ children }) {
   }, [refreshStats, refreshRequestCounts]);
 
   const createPO = useCallback(async (data, source = null) => {
-    await createPOServer(data);
     if (source?.reqNumber) {
-      await approveRequestPartial(source.reqNumber, source.approvedQty ?? data.qty);
+      await createPOWithApproval(data, source);
+    } else {
+      await createPOServer(data);
     }
     setPoVersion(v => v + 1);
     setRequestVersion(v => v + 1);

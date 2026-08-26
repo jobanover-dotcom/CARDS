@@ -16,10 +16,14 @@ function RequestDetailsModal({ request, onClose }) {
 
   const handleDeclineClick = () => setIsDeclineMode(true);
 
-  const handleSubmitDecline = () => {
+  const handleSubmitDecline = async () => {
     if (!declineRemarks.trim()) { alert('Please enter remarks for declining this request'); return; }
-    declineRequest(request.reqNumber, declineRemarks);
-    onClose();
+    try {
+      await declineRequest(request.reqNumber, declineRemarks);
+      onClose();
+    } catch (e) {
+      alert('Failed to decline request: ' + (e.message || 'Please try again.'));
+    }
   };
 
   const handleProceedPO = () => {
@@ -37,7 +41,7 @@ function RequestDetailsModal({ request, onClose }) {
       requisitioner: request.requisitioner,
       mrsNo: request.mrsNo,
       reqNumber: request.reqNumber,
-      requestWarehouse: (request.warehouse || request.requisitioner || '').toString(),
+      requestWarehouse: (request.warehouse || '').toString(),
       approvedBy: request.requestedBy,
       approvalDate: request.date,
     });

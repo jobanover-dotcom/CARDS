@@ -67,7 +67,11 @@ function UsersView() {
 
   const handleDeleteUser = async (username) => {
     if (window.confirm('Delete this user and their login access?')) {
-      await deleteUser(username);
+      try {
+        await deleteUser(username);
+      } catch (e) {
+        alert('Failed to delete user: ' + e.message);
+      }
     }
   };
 
@@ -79,7 +83,11 @@ function UsersView() {
   };
 
   const handleAssignWarehouse = async (username, warehouse) => {
-    await assignWarehouse(username, warehouse);
+    try {
+      await assignWarehouse(username, warehouse);
+    } catch (e) {
+      alert('Failed to assign warehouse: ' + e.message);
+    }
   };
 
   const handleAddWarehouse = async () => {

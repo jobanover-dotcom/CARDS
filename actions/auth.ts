@@ -78,6 +78,11 @@ export async function changePassword(username: string, currentPassword: string, 
 }
 
 export async function adminResetPassword(username: string) {
+  const caller = await getCurrentUser();
+  if (!caller || (caller.role !== 'Admin' && caller.role !== 'Superadmin')) {
+    return { error: 'Unauthorized: only purchasers and superadmins can reset passwords' };
+  }
+
   const profile = await prisma.profile.findUnique({ where: { username } });
   if (!profile) return { error: 'User not found' };
 

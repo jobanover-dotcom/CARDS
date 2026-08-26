@@ -1,4 +1,4 @@
-// File: C:\Users\joban\OneDrive\Desktop\luminatech\app\layout.js
+// File: /home/jam/Documents/Projects/CARDS-main/app/layout.js
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

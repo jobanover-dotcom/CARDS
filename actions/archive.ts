@@ -48,6 +48,14 @@ export async function restoreArchive(id: string) {
     prisma.warehouseRequest.createMany({ data: reqs, skipDuplicates: true }),
   ]);
 
+  if (entry.reason === 'deleted') {
+    await prisma.warehouse.upsert({
+      where: { name: entry.warehouseName },
+      update: {},
+      create: { name: entry.warehouseName },
+    });
+  }
+
   return {
     restoredPOs: poResult.count,
     skippedPOs: pos.length - poResult.count,
@@ -59,12 +67,10 @@ export async function restoreArchive(id: string) {
 export async function deleteWarehouseWithArchive(name: string) {
   await assertElevated();
 
-  const [pos, reqs] = await prisma.$transaction([
-    prisma.purchaseOrder.findMany({ where: { warehouse: name } }),
-    prisma.warehouseRequest.findMany({ where: { warehouse: name } }),
-  ]);
+  const { archivedPOs, archivedRequests } = await prisma.$transaction(async (tx) => {
+    const pos = await tx.purchaseOrder.findMany({ where: { warehouse: name } });
+    const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: name } });
 
-  await prisma.$transaction(async (tx) => {
     await tx.warehouseArchive.create({
       data: {
         warehouseName: name,
@@ -78,9 +84,11 @@ export async function deleteWarehouseWithArchive(name: string) {
     await tx.purchaseOrder.deleteMany({ where: { warehouse: name } });
     await tx.warehouseRequest.deleteMany({ where: { warehouse: name } });
     await tx.warehouse.delete({ where: { name } });
+
+    return { archivedPOs: pos.length, archivedRequests: reqs.length };
   });
 
-  return { success: true, archivedPOs: pos.length, archivedRequests: reqs.length };
+  return { success: true, archivedPOs, archivedRequests };
 }
 
 export async function systemReset() {
@@ -90,19 +98,18 @@ export async function systemReset() {
   }
 
   const warehouses = await prisma.warehouse.findMany({ orderBy: { name: 'asc' } });
+  const whNames = warehouses.map(w => w.name);
 
   let clearedPOs = 0;
   let clearedRequests = 0;
   let archived = 0;
 
   for (const wh of warehouses) {
-    const [pos, reqs] = await prisma.$transaction([
-      prisma.purchaseOrder.findMany({ where: { warehouse: wh.name } }),
-      prisma.warehouseRequest.findMany({ where: { warehouse: wh.name } }),
-    ]);
-    if (pos.length === 0 && reqs.length === 0) continue;
+    const result = await prisma.$transaction(async (tx) => {
+      const pos = await tx.purchaseOrder.findMany({ where: { warehouse: wh.name } });
+      const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: wh.name } });
+      if (pos.length === 0 && reqs.length === 0) return null;
 
-    await prisma.$transaction(async (tx) => {
       await tx.warehouseArchive.create({
         data: {
           warehouseName: wh.name,
@@ -115,11 +122,42 @@ export async function systemReset() {
       });
       await tx.purchaseOrder.deleteMany({ where: { warehouse: wh.name } });
       await tx.warehouseRequest.deleteMany({ where: { warehouse: wh.name } });
+
+      return { pos: pos.length, reqs: reqs.length };
     });
 
+    if (result) {
+      archived += 1;
+      clearedPOs += result.pos;
+      clearedRequests += result.reqs;
+    }
+  }
+
+  const [orphanPos, orphanReqs] = await prisma.$transaction([
+    prisma.purchaseOrder.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] } }),
+    prisma.warehouseRequest.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] } }),
+  ]);
+
+  if (orphanPos.length > 0 || orphanReqs.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      await tx.warehouseArchive.create({
+        data: {
+          warehouseName: '(Unassigned records)',
+          reason: 'reset',
+          poCount: orphanPos.length,
+          requestCount: orphanReqs.length,
+          poData: JSON.parse(JSON.stringify(orphanPos)),
+          requestData: JSON.parse(JSON.stringify(orphanReqs)),
+        },
+      });
+      const orphanIds = orphanPos.map(p => p.id);
+      await tx.purchaseOrder.deleteMany({ where: { id: { in: orphanIds } } });
+      const orphanReqIds = orphanReqs.map(r => r.id);
+      await tx.warehouseRequest.deleteMany({ where: { id: { in: orphanReqIds } } });
+    });
     archived += 1;
-    clearedPOs += pos.length;
-    clearedRequests += reqs.length;
+    clearedPOs += orphanPos.length;
+    clearedRequests += orphanReqs.length;
   }
 
   return { success: true, archived, clearedPOs, clearedRequests };

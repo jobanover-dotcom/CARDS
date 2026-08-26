@@ -2,10 +2,20 @@
 
 import { prisma } from '@/lib/prisma';
 import { createAdminSupabase } from '@/lib/supabase-server';
+import { getCurrentUser } from './auth';
 
 const EMAIL_DOMAIN = '@cards.app';
 
+async function assertElevated() {
+  const user = await getCurrentUser();
+  if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) {
+    throw new Error('Unauthorized: only purchasers and superadmins can manage users');
+  }
+  return user;
+}
+
 export async function getUsers({ offset = 0, limit = 10, search }: { offset?: number; limit?: number; search?: string } = {}) {
+  await assertElevated();
   const where: Record<string, unknown> = {};
   if (search) where.name = { contains: search, mode: 'insensitive' };
   const [rows, total] = await prisma.$transaction([
@@ -18,6 +28,7 @@ export async function getUsers({ offset = 0, limit = 10, search }: { offset?: nu
 export async function addUser(data: {
   username: string; name: string; role: string; warehouse?: string | null;
 }) {
+  await assertElevated();
   const supabase = await createAdminSupabase();
   const email = `${data.username}${EMAIL_DOMAIN}`;
 
@@ -41,6 +52,7 @@ export async function addUser(data: {
 }
 
 export async function deleteUser(username: string) {
+  await assertElevated();
   const profile = await prisma.profile.findUnique({ where: { username } });
   if (!profile) throw new Error('User not found');
 
@@ -52,6 +64,7 @@ export async function deleteUser(username: string) {
 }
 
 export async function updateUserWarehouse(username: string, warehouse: string) {
+  await assertElevated();
   return prisma.profile.update({
     where: { username },
     data: { warehouse },

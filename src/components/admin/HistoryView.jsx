@@ -188,9 +188,9 @@ function HistoryView() {
                         <td className="p-4 text-[#333] font-medium">{order.unit}</td>
                         <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
                         <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.mrsNo || '676767'}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.poExpDate || '12'}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.pickupBy || 'John Doe'}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.mrsNo || '-'}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.poExpDate || '-'}</td>
+                        <td className="p-4 text-[#333] font-medium">{order.pickupBy || '-'}</td>
                         <td className="p-4">
                           <StatusBadge status={order.status === 'completed' ? 'Completed' : 'Open'} />
                         </td>

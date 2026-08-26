@@ -84,20 +84,46 @@ export async function getMyPOCount() {
   return prisma.purchaseOrder.count({ where: { profileId: user.id } });
 }
 
-export async function createPO(data: {
+type CreatePOData = {
   date: string; poNumber: string; itemDescription: string; qty: number;
   unit: string; supplier: string; supplierAddress?: string; requisitioner: string;
   mrsNo: string; poExpDate?: string; poRvdDate?: string; pickupBy: string;
   plateNumber?: string; approvedBy?: string; listedBy?: string; notes?: string;
   warehouse: string; profileId?: string;
-}) {
-  return prisma.purchaseOrder.create({
-    data: {
-      ...data,
-      status: 'incomplete',
-      poType: 'active-delivery',
-      statusLabel: 'Open',
-    },
+};
+
+function withPoDefaults(data: CreatePOData) {
+  return {
+    ...data,
+    status: 'incomplete',
+    poType: 'active-delivery',
+    statusLabel: 'Open',
+  };
+}
+
+export async function createPO(data: CreatePOData) {
+  return prisma.purchaseOrder.create({ data: withPoDefaults(data) });
+}
+
+export async function createPOWithApproval(
+  data: CreatePOData,
+  source: { reqNumber: string; approvedQty?: number }
+) {
+  const user = await getCurrentUser();
+  if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) {
+    throw new Error('Unauthorized');
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const po = await tx.purchaseOrder.create({ data: withPoDefaults(data) });
+    const req = await tx.warehouseRequest.findUnique({ where: { reqNumber: source.reqNumber } });
+    if (!req) throw new Error(`Source request ${source.reqNumber} not found`);
+    const qty = Math.max(0, Math.min(source.approvedQty ?? req.qty, req.qty));
+    await tx.warehouseRequest.update({
+      where: { reqNumber: source.reqNumber },
+      data: { approvedQty: qty, status: qty >= req.qty ? 'Approved' : 'Partially Approved' },
+    });
+    return po;
   });
 }
 

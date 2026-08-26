@@ -26,13 +26,16 @@ function MonitoringDetailsForm({ po, onClose }) {
   const [monPickupBy, setMonPickupBy] = useState(po.pickupBy || '');
   const [monRemarks, setMonRemarks] = useState('');
   const [showMonSuccess, setShowMonSuccess] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [saving, setSaving] = useState(false);
 
-  const handleSave = (e) => {
+  const handleSave = async (e) => {
     e.preventDefault();
     if (!monQtyRvd || !monDeliveredBy || !monDateDelivered || !monReferenceNo || !monDrDate) {
       alert('Please fill in all required fields');
       return;
     }
+    if (saving) return;
 
     const qtyReceived = parseInt(monQtyRvd) || 0;
     const originalQty = parseInt(po.qty) || 0;
@@ -41,27 +44,35 @@ function MonitoringDetailsForm({ po, onClose }) {
     const finalPoType = isCoincided ? 'completed' : 'discrepancy';
     const finalStatusLabel = isCoincided ? 'Completed' : 'Open';
 
-    updatePO(po.poNumber, {
-      status: finalStatus,
-      poType: finalPoType,
-      statusLabel: finalStatusLabel,
-      qty: qtyReceived,
-      pickupBy: monPickupBy,
-      poExpDate: monDateDelivered,
-      supplierAddress: po.supplierAddress || 'Davao City',
-      notes: monRemarks || po.notes,
-      monQtyRvd,
-      monDeliveredBy,
-      monDateDelivered,
-      monReferenceNo,
-      monDrDate,
-      monRemarks,
-    });
-    setShowMonSuccess(true);
-    setTimeout(() => {
-      setShowMonSuccess(false);
-      onClose();
-    }, 2000);
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await updatePO(po.poNumber, {
+        status: finalStatus,
+        poType: finalPoType,
+        statusLabel: finalStatusLabel,
+        qty: qtyReceived,
+        pickupBy: monPickupBy,
+        poExpDate: monDateDelivered,
+        supplierAddress: po.supplierAddress || 'Davao City',
+        notes: monRemarks || po.notes,
+        monQtyRvd,
+        monDeliveredBy,
+        monDateDelivered,
+        monReferenceNo,
+        monDrDate,
+        monRemarks,
+      });
+      setShowMonSuccess(true);
+      setTimeout(() => {
+        setShowMonSuccess(false);
+        onClose();
+      }, 2000);
+    } catch (err) {
+      setSaveError(err?.message || 'Failed to save monitoring details. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -135,13 +146,19 @@ function MonitoringDetailsForm({ po, onClose }) {
             </div>
           </div>
 
+          {saveError && (
+            <div className="mb-4 px-3 py-2 rounded-md text-xs font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">
+              {saveError}
+            </div>
+          )}
+
           <div className="flex gap-4 items-end">
             <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
               <label>Remarks:</label>
               <textarea value={monRemarks} onChange={(e) => setMonRemarks(e.target.value)} placeholder="Enter remarks.." className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border resize-none h-[80px]" />
             </div>
             <div className="flex flex-col gap-2.5">
-              <button type="submit" className="py-2.5 px-8 bg-[#006680] text-white border-none rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#004d60] w-[120px]">Save</button>
+              <button type="submit" disabled={saving} className="py-2.5 px-8 bg-[#006680] text-white border-none rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#004d60] w-[120px] disabled:opacity-60 disabled:cursor-not-allowed">{saving ? 'Saving…' : 'Save'}</button>
               <button type="button" onClick={onClose} className="py-2.5 px-8 bg-white text-[#d32f2f] border border-[#d32f2f] rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff5f5] w-[120px]">Cancel</button>
             </div>
           </div>

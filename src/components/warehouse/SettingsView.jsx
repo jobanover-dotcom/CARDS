@@ -16,7 +16,7 @@ function SettingsView() {
     }
   }, [user, getUserInfo]);
 
-  const handlePasswordChange = () => {
+  const handlePasswordChange = async () => {
     setMessage(null);
     if (!currentPassword || !newPassword || !confirmPassword) {
       setMessage({ type: 'error', text: 'Please fill all password fields' });
@@ -30,14 +30,18 @@ function SettingsView() {
       setMessage({ type: 'error', text: 'Password must be at least 4 characters' });
       return;
     }
-    const result = changePassword(user.username, currentPassword, newPassword);
-    if (result.error) {
-      setMessage({ type: 'error', text: result.error });
-    } else {
-      setMessage({ type: 'success', text: 'Password changed successfully' });
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
+    try {
+      const result = await changePassword(user.username, currentPassword, newPassword);
+      if (result && result.error) {
+        setMessage({ type: 'error', text: result.error });
+      } else {
+        setMessage({ type: 'success', text: 'Password changed successfully' });
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+      }
+    } catch (e) {
+      setMessage({ type: 'error', text: e.message || 'Failed to change password. Please try again.' });
     }
   };
 

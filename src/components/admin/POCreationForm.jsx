@@ -27,13 +27,17 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const [formWarehouse, setFormWarehouse] = useState(
     initialData?.sourceRequestWarehouse || user?.warehouse || (warehouses.length > 0 ? warehouses[0] : '')
   );
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    setSubmitError(null);
     if (!formPoNumber || !formPoDate || !formItemDescription || !formQty || !formRequisitioner || !formMrsNo || !formPickupBy || !formPlateNumber || !formSupplierName || !formWarehouse) {
       alert('Please fill in all required fields marked with *');
       return;
     }
+    if (submitting) return;
 
     const newPO = {
       date: formPoDate,
@@ -61,9 +65,16 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
       ? { reqNumber: initialData.sourceReqNumber, approvedQty: parseInt(formQty) || 0 }
       : null;
 
-    createPO(newPO, source);
-    onClose();
-    onSuccess();
+    setSubmitting(true);
+    try {
+      await createPO(newPO, source);
+      onClose();
+      onSuccess();
+    } catch (err) {
+      setSubmitError(err?.message || 'Failed to create purchase order. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const inputClass = 'py-2.5 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] bg-white transition-all duration-200 w-full box-border focus:outline-none focus:border-[#0288d1] focus:ring-2 focus:ring-[#0288d1]/10 placeholder:text-[#bbb]';
@@ -78,6 +89,11 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {submitError && (
+            <div className="px-4 py-2.5 rounded-lg text-sm font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">
+              {submitError}
+            </div>
+          )}
           <div className="flex flex-col gap-1.5 text-left w-full">
             <label className={labelClass}>LISTED BY (PURCHASER) <span className="text-[#d32f2f] ml-0.5">*</span></label>
             <input type="text" value={formListedBy} onChange={(e) => setFormListedBy(e.target.value)} placeholder="Enter purchaser username" required className={inputClass} />
@@ -201,7 +217,7 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
 
           <div className="flex justify-center gap-4 mt-6 pt-4 border-t border-[#eee]">
             <button type="button" className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-white text-[#d32f2f] border border-[#d32f2f] hover:bg-[#fff5f5] hover:shadow-[0_2px_6px_rgba(211,47,47,0.1)]" onClick={onClose}>Cancel</button>
-            <button type="submit" className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-[#006680] text-white border-none hover:bg-[#004d60] hover:shadow-[0_2px_8px_rgba(0,102,128,0.2)]">Save</button>
+            <button type="submit" disabled={submitting} className="py-2.5 px-6 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[120px] bg-[#006680] text-white border-none hover:bg-[#004d60] hover:shadow-[0_2px_8px_rgba(0,102,128,0.2)] disabled:opacity-60 disabled:cursor-not-allowed">{submitting ? 'Saving…' : 'Save'}</button>
           </div>
         </form>
       </div>
