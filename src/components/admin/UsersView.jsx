@@ -105,8 +105,12 @@ function UsersView() {
 
   const handleDeleteWarehouse = async (name) => {
     if (warehouses.length <= 1) { alert('You must have at least one warehouse in the system.'); return; }
-    if (window.confirm(`Are you sure you want to delete "${name}"?`)) {
-      await deleteWarehouse(name);
+    if (window.confirm(`Are you sure you want to delete "${name}"?\n\nIts purchase orders and requests will be moved to the Archive, and all users assigned to "${name}" (including their logins) will be permanently deleted.`)) {
+      try {
+        await deleteWarehouse(name);
+      } catch (e) {
+        alert('Failed to delete warehouse: ' + e.message);
+      }
     }
   };
 

@@ -3,6 +3,7 @@ import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { getRoleLabel } from '../../lib/roleLabel';
 
 const logoutIcon = (
   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -16,11 +17,7 @@ function Sidebar({ menuItems, logo }) {
   const { user, logout } = useAuth();
   const pathname = usePathname();
 
-  const userBadge = user?.role === 'Superadmin'
-    ? 'Admin'
-    : user?.role === 'Admin'
-      ? 'Purchaser'
-      : user?.warehouse || 'Warehouse';
+  const userBadge = getRoleLabel(user);
 
   return (
     <div className="w-[240px] max-md:w-full bg-[#e8eef2] p-6 max-md:p-4 flex flex-col max-md:flex-row max-md:items-center border-r border-[#ddd] max-md:border-r-0 max-md:border-b overflow-y-auto">

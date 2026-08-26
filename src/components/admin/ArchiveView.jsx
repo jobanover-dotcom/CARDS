@@ -2,11 +2,18 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import EmptyState from '../ui/EmptyState';
 import PageSkeleton from '../ui/PageSkeleton';
-import { getArchiveEntries, getArchiveSnapshot, restoreArchive } from '../../../actions/archive';
+import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity } from '../../../actions/archive';
 import * as XLSX from 'xlsx';
+
+const ACTION_BADGES = {
+  archived: 'bg-red-50 text-red-700 border-red-300',
+  restored: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
+  downloaded: 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
+};
 
 function ArchiveView() {
   const [entries, setEntries] = useState([]);
+  const [activity, setActivity] = useState([]);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -30,7 +37,15 @@ function ArchiveView() {
     }
   }, []);
 
-  useEffect(() => { loadEntries(); }, [loadEntries]);
+  const loadActivity = useCallback(async () => {
+    try {
+      setActivity(await getArchiveActivity());
+    } catch {
+      /* activity list is non-critical */
+    }
+  }, []);
+
+  useEffect(() => { loadEntries(); loadActivity(); }, [loadEntries, loadActivity]);
 
   const years = useMemo(
     () => [...new Set(entries.map(e => new Date(e.clearedAt).getFullYear()))].sort((a, b) => b - a),
@@ -59,7 +74,7 @@ function ArchiveView() {
   const handleDownload = async () => {
     setBusy(true);
     try {
-      const snap = await getArchiveSnapshot(selectedEntry.id);
+      const snap = await recordArchiveDownload(selectedEntry.id);
       const wb = XLSX.utils.book_new();
 
       const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'Pick-up by', 'Status'];
@@ -84,6 +99,7 @@ function ArchiveView() {
       const ts = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
       XLSX.writeFile(wb, `${snap.warehouseName.replace(/\s+/g, '_')}_${ts}_Archive.xlsx`);
       setSelectedEntry(null);
+      loadActivity();
     } catch (e) {
       alert('Failed to download archive: ' + e.message);
     } finally {
@@ -97,9 +113,11 @@ function ArchiveView() {
       const result = await restoreArchive(selectedEntry.id);
       setNotice(`Restored ${result.restoredPOs} purchase order(s) and ${result.restoredRequests} request(s)` +
         ((result.skippedPOs + result.skippedReqs) > 0
-          ? ` — skipped ${result.skippedPOs} PO(s) and ${result.skippedReqs} request(s) already existing.`
+          ? ` — skipped ${result.skippedPOs} duplicate PO(s) and ${result.skippedReqs} duplicate request(s).`
           : '.'));
       setSelectedEntry(null);
+      loadEntries();
+      loadActivity();
     } catch (e) {
       alert('Failed to restore archive: ' + e.message);
     } finally {
@@ -193,6 +211,43 @@ function ArchiveView() {
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="mt-8 mb-3 flex items-center justify-between">
+        <h2 className="m-0 text-lg text-[#333] font-bold">Activity History</h2>
+        <span className="text-xs text-[#999]">Permanent record — kept even after system resets</span>
+      </div>
+      <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
+        <div className="overflow-x-auto max-h-[300px]">
+          <table className="w-full min-w-[700px] border-collapse text-[13px]">
+            <thead>
+              <tr>
+                {['Date & Time', 'Warehouse', 'Action', 'Details', 'By'].map((h, i) => (
+                  <th key={i} className="bg-gradient-to-r from-[#f0f4f8] to-[#dce6f0] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {activity.length > 0 ? activity.map((a, index) => (
+                <tr key={a.id} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                  <td className="p-4 text-[#333] whitespace-nowrap">
+                    {new Date(a.createdAt).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </td>
+                  <td className="p-4 text-[#333] font-semibold">{a.warehouseName}</td>
+                  <td className="p-4">
+                    <span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${ACTION_BADGES[a.action] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
+                      {a.action}
+                    </span>
+                  </td>
+                  <td className="p-4 text-[#555]">{a.detail || '—'}</td>
+                  <td className="p-4 text-[#333]">{a.actor || '—'}</td>
+                </tr>
+              )) : (
+                <EmptyState colSpan={5} message="No archive activity yet" />
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {selectedEntry && (

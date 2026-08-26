@@ -1,6 +1,7 @@
 'use client';
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { getRoleLabel } from '../../lib/roleLabel';
 import { systemReset } from '../../../actions/archive';
 
 function SuperadminSettingsView() {
@@ -76,7 +77,7 @@ function SuperadminSettingsView() {
           <span className="text-gray-500 font-semibold">Username:</span>
           <span className="text-[#333] font-medium">{user?.username || '-'}</span>
           <span className="text-gray-500 font-semibold">Role:</span>
-          <span className="text-[#333] font-medium">Superadmin</span>
+          <span className="text-[#333] font-medium">{getRoleLabel(user) || '-'}</span>
           <span className="text-gray-500 font-semibold">User ID:</span>
           <span className="text-[#333] font-medium">{userInfo?.userId || '-'}</span>
         </div>

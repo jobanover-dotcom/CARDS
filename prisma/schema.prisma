@@ -91,3 +91,12 @@ model WarehouseArchive {
   requestData   Json
   createdAt     DateTime @default(now())
 }
+
+model ArchiveActivityLog {
+  id            String   @id @default(uuid())
+  warehouseName String
+  action        String
+  detail        String?
+  actor         String?
+  createdAt     DateTime @default(now())
+}
