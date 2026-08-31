@@ -25,9 +25,12 @@ function MonitoringDetailsForm({ po, onClose }) {
   const [monDrDate, setMonDrDate] = useState('');
   const [monPickupBy, setMonPickupBy] = useState(po.pickupBy || '');
   const [monRemarks, setMonRemarks] = useState('');
+  const [markAsDiscrepancy, setMarkAsDiscrepancy] = useState(po.poType === 'discrepancy');
   const [showMonSuccess, setShowMonSuccess] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(false);
+
+  const isDiscrepancyRequired = markAsDiscrepancy && !monRemarks.trim();
 
   const handleSave = async (e) => {
     e.preventDefault();
@@ -43,10 +46,15 @@ function MonitoringDetailsForm({ po, onClose }) {
       setSaveError('Qty received must be a positive number.');
       return;
     }
-    const isCoincided = qtyReceived === originalQty;
-    const finalStatus = isCoincided ? 'completed' : 'incomplete';
-    const finalPoType = isCoincided ? 'completed' : 'discrepancy';
-    const finalStatusLabel = isCoincided ? 'Completed' : 'Open';
+    if (markAsDiscrepancy && !monRemarks.trim()) {
+      setSaveError('Discrepancy remarks are required before saving this PO.');
+      return;
+    }
+
+    const hasDiscrepancy = markAsDiscrepancy || qtyReceived !== originalQty;
+    const finalStatus = hasDiscrepancy ? 'incomplete' : 'completed';
+    const finalPoType = hasDiscrepancy ? 'discrepancy' : 'completed';
+    const finalStatusLabel = hasDiscrepancy ? 'Discrepancy' : 'Completed';
 
     setSaving(true);
     setSaveError(null);
@@ -156,13 +164,41 @@ function MonitoringDetailsForm({ po, onClose }) {
             </div>
           )}
 
+          <div className="flex items-center gap-2 pt-1">
+            <input
+              id="mark-discrepancy"
+              type="checkbox"
+              checked={markAsDiscrepancy}
+              onChange={(e) => setMarkAsDiscrepancy(e.target.checked)}
+              className="h-4 w-4 rounded border-[#b0bec5] text-[#d32f2f] focus:ring-[#d32f2f]"
+            />
+            <label htmlFor="mark-discrepancy" className="text-[11px] font-bold text-[#444]">Mark as discrepancy</label>
+          </div>
+
+          {markAsDiscrepancy && (
+            <div className="px-3 py-2 rounded-md border border-[#ef9a9a] bg-[#ffebee] text-[#c62828] text-[11px] font-semibold">
+              Please add a remark explaining the discrepancy before saving this PO.
+            </div>
+          )}
+
           <div className="flex gap-4 items-end">
             <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
               <label>Remarks:</label>
-              <textarea value={monRemarks} onChange={(e) => setMonRemarks(e.target.value)} placeholder="Enter remarks.." className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border resize-none h-[80px]" />
+              <textarea
+                value={monRemarks}
+                onChange={(e) => setMonRemarks(e.target.value)}
+                placeholder="Enter remarks.."
+                className={`py-2 px-3 border rounded-md text-[13px] text-[#333] focus:outline-none w-full box-border resize-none h-[80px] ${markAsDiscrepancy && !monRemarks.trim() ? 'border-[#d32f2f] bg-[#fff5f5] focus:border-[#d32f2f]' : 'border-[#ccc] focus:border-[#006680]'}`}
+              />
             </div>
             <div className="flex flex-col gap-2.5">
-              <button type="submit" disabled={saving} className="py-2.5 px-8 bg-[#006680] text-white border-none rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#004d60] w-[120px] disabled:opacity-60 disabled:cursor-not-allowed">{saving ? 'Saving…' : 'Save'}</button>
+              <button
+                type="submit"
+                disabled={saving || isDiscrepancyRequired}
+                className="py-2.5 px-8 bg-[#006680] text-white border-none rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#004d60] w-[120px] disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
               <button type="button" onClick={onClose} className="py-2.5 px-8 bg-white text-[#d32f2f] border border-[#d32f2f] rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff5f5] w-[120px]">Cancel</button>
             </div>
           </div>

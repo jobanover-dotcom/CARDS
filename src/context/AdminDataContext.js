@@ -1,6 +1,6 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer } from '../../actions/pos';
+import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
 import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
@@ -107,6 +107,11 @@ export function AdminDataProvider({ children }) {
     setUserVersion(v => v + 1);
   }, []);
 
+  const deletePO = useCallback(async (poNumber) => {
+    await deletePOServer(poNumber);
+    setPoVersion(v => v + 1);
+  }, []);
+
   return (
     <AdminDataContext.Provider value={{
       warehouses,
@@ -117,7 +122,7 @@ export function AdminDataProvider({ children }) {
       requestVersion,
       userVersion,
       refreshStats,
-      createPO, updatePO, addUser, deleteUser, assignWarehouse,
+      createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
       addWarehouse: handleAddWarehouse,

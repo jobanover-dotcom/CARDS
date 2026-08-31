@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import * as XLSX from 'xlsx';
 
-function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
+function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeActiveDelivery = false) {
   const wb = XLSX.utils.book_new();
 
   const headerStyle = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1E3C72' } }, alignment: { horizontal: 'center', wrapText: true }, border: { all: { style: 'thin', color: { rgb: '999999' } } } };
@@ -15,7 +15,7 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
 
   const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by'];
   const monHeaders = ['PO number', 'Pick-up date', 'Item Description', 'Qty. rvd', 'Unit', 'Delivered By', 'Date delivered', 'Reference No.', 'DR date', 'Pick-up By'];
-  const allHeaders = [...poHeaders, ...monHeaders];
+  let allHeaders = [...poHeaders, ...monHeaders];
 
   const wsData = [];
 
@@ -26,6 +26,10 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
   wsData.push(['Completed:', completedPOs, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
   wsData.push(['Incomplete:', incompletePOs, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
   wsData.push([]);
+  
+  if (includeActiveDelivery) {
+    allHeaders = [...allHeaders, 'Status'];
+  }
   wsData.push(allHeaders);
 
   orders.forEach(order => {
@@ -53,7 +57,19 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
       order.monDrDate || '',
       order.pickupBy,
     ];
-    wsData.push([...poRow, ...monRow]);
+    let rowData = [...poRow, ...monRow];
+    if (includeActiveDelivery) {
+      let status = '';
+      if (order.status === 'completed') {
+        status = 'Completed';
+      } else if (order.poType === 'active-delivery') {
+        status = 'Active Delivery';
+      } else {
+        status = 'Incomplete';
+      }
+      rowData.push(status);
+    }
+    wsData.push(rowData);
   });
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -63,6 +79,7 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
     { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
     { wch: 14 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 8 },
     { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 12 }, { wch: 14 },
+    { wch: 16 },
   ];
 
   const dataStartRow = 7;
@@ -71,8 +88,10 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
     if (ws[ref]) {
       if (i < poHeaders.length) {
         ws[ref].s = headerStyle;
-      } else {
+      } else if (i < poHeaders.length + monHeaders.length) {
         ws[ref].s = greenHeaderStyle;
+      } else {
+        ws[ref].s = headerStyle;
       }
     }
   });
@@ -87,9 +106,10 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
     }
   }
 
+  const mergeEndCol = includeActiveDelivery ? 20 : 19;
   ws['!merges'] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 19 } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 19 } },
+    { s: { r: 0, c: 0 }, e: { r: 0, c: mergeEndCol } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: mergeEndCol } },
   ];
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
@@ -100,7 +120,7 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs) {
     for (let c = 0; c < allHeaders.length; c++) {
       const ref = XLSX.utils.encode_cell({ r: i, c });
       if (ws[ref]) {
-        if (isDiscrepancy && c >= poHeaders.length) {
+        if (isDiscrepancy && c >= poHeaders.length && c < poHeaders.length + monHeaders.length) {
           ws[ref].s = discrepancyStyle;
         } else {
           ws[ref].s = cellStyle;
@@ -137,7 +157,7 @@ function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
       const finalTotal = finalOrders.length;
       const finalCompleted = finalOrders.filter(o => o.status === 'completed').length;
       const finalIncomplete = finalOrders.filter(o => o.status === 'incomplete').length;
-      generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete);
+      generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete, includeActiveDelivery);
       setShowConfirmModal(false);
     } catch (e) {
       alert('Failed to generate report: ' + e.message);

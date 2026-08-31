@@ -1,6 +1,120 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import { useAuth } from '../../context/AuthContext';
+import { useAdminData } from '../../context/AdminDataContext';
+
+function getStatusDisplay(po) {
+  if (po.statusLabel) {
+    return po.statusLabel;
+  }
+  if (po.status === 'completed') {
+    return 'Completed';
+  }
+  if (po.poType === 'active-delivery') {
+    return 'Active Delivery';
+  }
+  if (po.poType === 'discrepancy') {
+    return 'Discrepancy';
+  }
+  return 'Open';
+}
+
+function getStatusColor(po) {
+  if (po.status === 'completed') {
+    return { bg: 'bg-[#e8f5e9]', text: 'text-[#2e7d32]', border: 'border-[#a5d6a7]' };
+  }
+  if (po.poType === 'active-delivery') {
+    return { bg: 'bg-[#e3f2fd]', text: 'text-[#1e3c72]', border: 'border-[#90caf9]' };
+  }
+  if (po.poType === 'discrepancy') {
+    return { bg: 'bg-[#fef5f5]', text: 'text-[#c62828]', border: 'border-[#f44336]' };
+  }
+  return { bg: 'bg-[#fff9e6]', text: 'text-[#f57f17]', border: 'border-[#ffb74d]' };
+}
+
+function parsePoDate(dateStr) {
+  if (!dateStr) return null;
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return null;
+  const month = parseInt(parts[0], 10) - 1;
+  const day = parseInt(parts[1], 10);
+  const year = parseInt(parts[2], 10) + 2000;
+  return new Date(year, month, day);
+}
+
+function isWithin3Days(dateStr) {
+  const poDate = parsePoDate(dateStr);
+  if (!poDate) return false;
+  const now = new Date();
+  const diffTime = now - poDate;
+  const diffDays = diffTime / (1000 * 60 * 60 * 24);
+  return diffDays <= 3;
+}
+
+function isViewed(poNumber) {
+  if (typeof window === 'undefined') return false;
+  const viewed = localStorage.getItem('viewedPOs');
+  if (!viewed) return false;
+  try {
+    const viewedList = JSON.parse(viewed);
+    return viewedList.includes(poNumber);
+  } catch {
+    return false;
+  }
+}
+
+function markAsViewed(poNumber) {
+  if (typeof window === 'undefined') return;
+  const viewed = localStorage.getItem('viewedPOs');
+  let viewedList = [];
+  if (viewed) {
+    try {
+      viewedList = JSON.parse(viewed);
+    } catch {
+      viewedList = [];
+    }
+  }
+  if (!viewedList.includes(poNumber)) {
+    viewedList.push(poNumber);
+    localStorage.setItem('viewedPOs', JSON.stringify(viewedList));
+  }
+}
 
 function MaterialRequestReceipt({ po, onClose }) {
+  const [showNewRequest, setShowNewRequest] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState(null);
+  const { user } = useAuth();
+  const { deletePO } = useAdminData();
+  const isSuperadmin = user?.role === 'Superadmin';
+
+  const handleDeletePO = async () => {
+    if (!window.confirm(`Are you sure you want to permanently delete PO ${po.poNumber}? This action cannot be undone.`)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deletePO(po.poNumber);
+      onClose();
+    } catch (e) {
+      setError(e.message || 'Failed to delete purchase order');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  useEffect(() => {
+    const viewed = isViewed(po.poNumber);
+    const within3Days = isWithin3Days(po.date);
+    const shouldShow = !viewed && within3Days;
+    setShowNewRequest(shouldShow);
+
+    if (!viewed) {
+      markAsViewed(po.poNumber);
+    }
+  }, [po.poNumber, po.date]);
+
+  const statusDisplay = getStatusDisplay(po);
+  const statusColor = getStatusColor(po);
+
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[1050] animate-fade-in overflow-y-auto py-10 px-4">
       <div className="bg-white rounded-xl w-full max-w-[500px] shadow-[0_10px_40px_rgba(0,0,0,0.2)] animate-slide-in p-8 text-[#333] border border-gray-200 font-sans relative">
@@ -23,10 +137,18 @@ function MaterialRequestReceipt({ po, onClose }) {
 
         <div className="flex justify-between items-center text-xs font-bold border-b border-gray-200 pb-2 mb-4">
           <span className="font-mono text-[#444]">{po.poNumber || 'PO-REQ-001'}</span>
-          <span className="text-[#0288d1] flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#0288d1] inline-block"></span>
-            {po.status === 'completed' ? 'Completed' : 'New Request'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${statusColor.bg} ${statusColor.text} ${statusColor.border}`}>
+              <span className="w-1.5 h-1.5 rounded-full bg-current inline-block"></span>
+              {statusDisplay}
+            </span>
+            {showNewRequest && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#fff3e0] text-[#e65100] border border-[#ffb74d] animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-[#ff9800] inline-block animate-bounce"></span>
+                New Request
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="flex flex-col gap-4 text-[12px]">
@@ -109,12 +231,8 @@ function MaterialRequestReceipt({ po, onClose }) {
               </div>
               <div className="text-right">
                 <span className="font-bold text-[#333] block">{po.qty} {po.unit}</span>
-                <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold mt-1.5 uppercase ${
-                  po.status === 'completed'
-                    ? 'bg-[#e8f5e9] text-[#2e7d32]'
-                    : 'bg-[#fff9e6] text-[#f57f17]'
-                }`}>
-                  {po.status === 'completed' ? 'Completed' : 'Pending'}
+                <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold mt-1.5 uppercase ${statusColor.bg} ${statusColor.text}`}>
+                  {statusDisplay}
                 </span>
               </div>
             </div>
@@ -188,7 +306,23 @@ function MaterialRequestReceipt({ po, onClose }) {
           CARWILL CONSTRUCTION INC. &bull; {po.mrsNo || 'MRS-001'} &bull; {po.poNumber || 'PO-001'}
         </div>
 
+        {error && (
+          <div className="mb-4 px-4 py-2.5 rounded-lg text-xs font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">
+            {error}
+          </div>
+        )}
+
         <div className="flex justify-center gap-3 mt-6 pt-4 border-t border-gray-100 no-print">
+          {isSuperadmin && (
+            <button
+              type="button"
+              className="py-2.5 px-6 rounded-md text-xs font-bold cursor-pointer transition-all duration-200 bg-[#d32f2f] text-white border-none hover:bg-[#b71c1c] flex-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleDeletePO}
+              disabled={deleting}
+            >
+              {deleting ? 'Deleting…' : 'Delete PO'}
+            </button>
+          )}
           <button
             type="button"
             className="py-2.5 px-6 rounded-md text-xs font-bold cursor-pointer transition-all duration-200 bg-white text-[#555] border border-gray-300 hover:bg-gray-50 flex-1"

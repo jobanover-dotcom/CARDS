@@ -155,3 +155,16 @@ export async function updatePO(poNumber: string, data: Partial<{
     data,
   });
 }
+
+async function assertCanDeletePOs() {
+  const user = await getCurrentUser();
+  if (!user || user.role !== 'Superadmin') {
+    throw new Error('Unauthorized: only superadmin can delete purchase orders');
+  }
+  return user;
+}
+
+export async function deletePO(poNumber: string) {
+  await assertCanDeletePOs();
+  return prisma.purchaseOrder.delete({ where: { poNumber } });
+}

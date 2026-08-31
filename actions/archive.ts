@@ -157,6 +157,30 @@ export async function deleteWarehouseWithArchive(name: string) {
   return { success: true, archivedPOs, archivedRequests, deletedUsers };
 }
 
+export async function deleteArchiveEntry(id: string) {
+  const user = await assertElevated();
+  if (user.role !== 'Superadmin') {
+    throw new Error('Only Superadmin can permanently delete archive entries');
+  }
+
+  const entry = await prisma.warehouseArchive.findUnique({ where: { id } });
+  if (!entry) throw new Error('Archive entry not found');
+
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.archiveActivityLog.deleteMany({ where: { warehouseName: entry.warehouseName } });
+    await tx.warehouseArchive.delete({ where: { id: entry.id } });
+  });
+
+  await logActivity({
+    warehouseName: entry.warehouseName,
+    action: 'archived',
+    detail: `Archive entry permanently deleted by Superadmin ${user.username}`,
+    actor: user.username,
+  });
+
+  return { success: true, deletedWarehouse: entry.warehouseName };
+}
+
 export async function systemReset() {
   const user = await getCurrentUser();
   if (!user || user.role !== 'Superadmin') {
@@ -222,7 +246,7 @@ export async function systemReset() {
           poCount: orphanPos.length,
           requestCount: orphanReqs.length,
           poData: JSON.parse(JSON.stringify(orphanPos)),
-          requestData: JSON.parse(JSON.stringify(orphanReqs)),
+          requestData: JSON.parse(JSON.stringify(reqs)),
         },
       });
       const orphanIds = orphanPos.map(p => p.id);

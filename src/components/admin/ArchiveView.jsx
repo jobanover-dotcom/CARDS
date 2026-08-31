@@ -1,8 +1,9 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import EmptyState from '../ui/EmptyState';
 import PageSkeleton from '../ui/PageSkeleton';
-import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity } from '../../../actions/archive';
+import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity, deleteArchiveEntry } from '../../../actions/archive';
 import * as XLSX from 'xlsx';
 
 const ACTION_BADGES = {
@@ -12,6 +13,8 @@ const ACTION_BADGES = {
 };
 
 function ArchiveView() {
+  const { user } = useAuth();
+  const isSuperadmin = user?.role === 'Superadmin';
   const [entries, setEntries] = useState([]);
   const [activity, setActivity] = useState([]);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -25,6 +28,8 @@ function ArchiveView() {
   const [showActivityLog, setShowActivityLog] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
 
   const loadEntries = useCallback(async () => {
     try {
@@ -121,6 +126,23 @@ function ArchiveView() {
       loadActivity();
     } catch (e) {
       alert('Failed to restore archive: ' + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    setBusy(true);
+    try {
+      const result = await deleteArchiveEntry(selectedEntry.id);
+      setNotice(`Permanently deleted archive for ${result.deletedWarehouse} and all its activity logs.`);
+      setSelectedEntry(null);
+      setShowDeleteConfirm(false);
+      setDeleteConfirmText('');
+      loadEntries();
+      loadActivity();
+    } catch (e) {
+      alert('Failed to delete archive: ' + e.message);
     } finally {
       setBusy(false);
     }
@@ -276,26 +298,25 @@ function ArchiveView() {
 
       {selectedEntry && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in">
-          <div className="bg-white rounded-xl w-full max-w-[420px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 text-left">
+          <div className="bg-white rounded-xl w-full max-w-[420px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 text-left relative">
+            <button
+              className="absolute top-4 right-4 bg-none border-none text-2xl cursor-pointer text-[#888] hover:text-[#333] transition-colors duration-200 p-1 leading-none"
+              onClick={() => setSelectedEntry(null)}
+            >
+              &times;
+            </button>
             <h2 className="m-0 text-lg font-bold text-[#333] mb-1">{selectedEntry.warehouseName}</h2>
             <p className="mt-0 mx-0 mb-4 text-xs text-[#999]">
               {selectedEntry.reason === 'deleted' ? 'Deleted warehouse' : 'Cleared by system reset'} · {new Date(selectedEntry.clearedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} · {selectedEntry.poCount} POs · {selectedEntry.requestCount} requests
             </p>
             <p className="mt-0 mx-0 mb-5 text-[13px] text-[#555]">What would you like to do with this data?</p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setSelectedEntry(null)}
-                disabled={busy}
-                className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-white text-[#555] border border-[#ccc] hover:bg-gray-50"
-              >
-                Cancel
-              </button>
+            <div className="flex flex-wrap justify-end gap-3">
               <button
                 onClick={handleDownload}
                 disabled={busy}
                 className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-[#1e3c72] text-white border-none hover:bg-[#2a5298] disabled:opacity-60"
               >
-                Download Excel
+                Download
               </button>
               <button
                 onClick={handleRestore}
@@ -303,6 +324,52 @@ function ArchiveView() {
                 className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-[#2e7d32] text-white border-none hover:bg-[#1b5e20] disabled:opacity-60"
               >
                 Restore
+              </button>
+              {isSuperadmin && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  disabled={busy}
+                  className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-[#d32f2f] text-white border-none hover:bg-[#b71c1c] disabled:opacity-60"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteConfirm && selectedEntry && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1010] animate-fade-in">
+          <div className="bg-white rounded-xl w-full max-w-[420px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 text-left">
+            <h2 className="m-0 text-lg font-bold text-[#c62828] mb-3">Confirm Permanent Deletion</h2>
+            <p className="mt-0 mx-0 mb-4 text-[13px] text-[#555] leading-relaxed">
+              This will <strong>permanently delete</strong> the archive entry for <strong>{selectedEntry.warehouseName}</strong> 
+              and <strong>all associated activity logs</strong>. This action cannot be undone.
+            </p>
+            <p className="mt-0 mx-0 mb-2 text-xs text-[#888]">Type <strong>DELETE</strong> to confirm:</p>
+            <input
+              type="text"
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder="DELETE"
+              className="w-full py-2.5 px-3 border border-gray-300 rounded-md text-sm mb-5"
+              disabled={busy}
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => { setShowDeleteConfirm(false); setDeleteConfirmText(''); }}
+                disabled={busy}
+                className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-white text-[#555] border border-[#ccc] hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={busy || deleteConfirmText !== 'DELETE'}
+                className="py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer bg-[#d32f2f] text-white border-none hover:bg-[#b71c1c] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {busy ? 'Deleting…' : 'Yes, Delete Permanently'}
               </button>
             </div>
           </div>
