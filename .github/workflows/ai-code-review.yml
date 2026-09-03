@@ -1,0 +1,98 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  ai-review:
+    name: AI Code Review
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@ai-review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install Python & dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3 python3-pip
+          pip3 install --user litellm python-dotenv
+
+      - name: Install AI script dependencies
+        run: |
+          cd scripts
+          pip3 install --user litellm python-dotenv
+
+      - name: Run AI code review on PR
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "Running AI code review on changed files..."
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.ts' '*.tsx' '*.prisma' | head -20)
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No relevant files changed"
+            exit 0
+          fi
+          
+          for file in $CHANGED_FILES; do
+            echo "Reviewing $file..."
+            python3 scripts/ai_api.py review auto "$file" 2>&1 | tee review_output.txt
+            
+            REVIEW_BODY=$(cat review_output.txt)
+            if [ -n "$REVIEW_BODY" ]; then
+              gh pr comment ${{ github.event.pull_request.number }} --body "## AI Code Review: \`$file\`
+
+$REVIEW_BODY
+
+*Review by AI (Gemini 2.5 Flash / Nemotron 3.5) via LiteLLM*"
+            done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+      - name: Respond to @ai-review comments
+        if: github.event_name == 'issue_comment'
+        run: |
+          COMMENT="${{ github.event.comment.body }}"
+          QUERY=$(echo "$COMMENT" | sed 's/.*@ai-review //')
+          echo "AI Query: $QUERY"
+          
+          python3 scripts/ai_api.py chat auto "$QUERY" 2>&1 | tee response.txt
+          
+          RESPONSE=$(cat response.txt)
+          if [ -n "$RESPONSE" ]; then
+            gh issue comment ${{ github.event.issue.number }} --body "## AI Response
+
+$RESPONSE
+
+*Response by AI (Gemini 2.5 Flash / Nemotron 3.5) via LiteLLM*"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+      - name: Upload review logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-logs
+          path: |
+            review_output.txt
+            response.txt

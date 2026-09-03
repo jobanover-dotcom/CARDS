@@ -2,29 +2,65 @@
   "name": "luminatech",
   "version": "0.1.0",
   "private": true,
+  "overrides": {
+    "uuid": "^11.0.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:e2e": "playwright test",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "db:seed": "node prisma/seed.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.111.0",
+    "@tanstack/react-query": "^5.17.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "date-fns": "^3.2.0",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.440.0",
     "next": "^15.5.24",
     "pg": "^8.22.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "xlsx": "^0.18.5"
+    "sonner": "^1.5.0",
+    "tailwind-merge": "^3.6.0",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
+    "@next/eslint-plugin-next": "^16.3.4",
+    "@playwright/test": "^1.41.0",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitest/ui": "^4.1.11",
     "autoprefixer": "^10.5.0",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^27.4.0",
     "postcss": "^8.5.15",
     "prisma": "^7.9.1",
-    "tailwindcss": "^3.4.19"
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.3.0",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^4.1.11"
   }
 }

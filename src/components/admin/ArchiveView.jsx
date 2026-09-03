@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import EmptyState from '../ui/EmptyState';
 import PageSkeleton from '../ui/PageSkeleton';
 import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity, deleteArchiveEntry } from '../../../actions/archive';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 
 const ACTION_BADGES = {
   archived: 'bg-red-50 text-red-700 border-red-300',
@@ -81,29 +81,40 @@ function ArchiveView() {
     setBusy(true);
     try {
       const snap = await recordArchiveDownload(selectedEntry.id);
-      const wb = XLSX.utils.book_new();
+      const wb = new ExcelJS.Workbook();
 
       const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'Pick-up by', 'Status'];
       const poRows = (snap.poData || []).map(o => [
         o.date, o.poNumber, o.itemDescription, o.qty, o.unit,
         o.supplier, o.requisitioner, o.mrsNo, o.pickupBy, o.statusLabel || o.status,
       ]);
-      const wsPO = XLSX.utils.aoa_to_sheet([poHeaders, ...poRows]);
-      wsPO['!cols'] = [{ wch: 12 }, { wch: 16 }, { wch: 28 }, { wch: 8 }, { wch: 8 }, { wch: 20 }, { wch: 20 }, { wch: 14 }, { wch: 18 }, { wch: 14 }];
-      XLSX.utils.book_append_sheet(wb, wsPO, 'Purchase Orders');
+      const wsPO = wb.addWorksheet('Purchase Orders');
+      wsPO.columns = [{ width: 12 }, { width: 16 }, { width: 28 }, { width: 8 }, { width: 8 }, { width: 20 }, { width: 20 }, { width: 14 }, { width: 18 }, { width: 14 }];
+      wsPO.addRow(poHeaders);
+      poRows.forEach(r => wsPO.addRow(r));
 
       const reqHeaders = ['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'];
       const reqRows = (snap.requestData || []).map(r => [
         r.date, r.reqNumber, r.mrsNo, r.itemDescription, r.qty, r.unit,
         r.requestedBy, r.requisitioner, r.approvedQty ?? '', r.status,
       ]);
-      const wsReq = XLSX.utils.aoa_to_sheet([reqHeaders, ...reqRows]);
-      wsReq['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 28 }, { wch: 8 }, { wch: 8 }, { wch: 18 }, { wch: 20 }, { wch: 12 }, { wch: 18 }];
-      XLSX.utils.book_append_sheet(wb, wsReq, 'Requests');
+      const wsReq = wb.addWorksheet('Requests');
+      wsReq.columns = [{ width: 12 }, { width: 14 }, { width: 14 }, { width: 28 }, { width: 8 }, { width: 8 }, { width: 18 }, { width: 20 }, { width: 12 }, { width: 18 }];
+      wsReq.addRow(reqHeaders);
+      reqRows.forEach(r => wsReq.addRow(r));
 
       const d = new Date(snap.clearedAt);
       const ts = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      XLSX.writeFile(wb, `${snap.warehouseName.replace(/\s+/g, '_')}_${ts}_Archive.xlsx`);
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${snap.warehouseName.replace(/\s+/g, '_')}_${ts}_Archive.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
       setSelectedEntry(null);
       loadActivity();
     } catch (e) {

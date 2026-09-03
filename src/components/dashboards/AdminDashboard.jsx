@@ -14,7 +14,7 @@ import { getWarehouses } from '../../../actions/warehouses';
 
 function AdminDashboard() {
   const { user, logout } = useAuth();
-  const { warehouses, poVersion, requestVersion, userVersion, refreshStats, refreshRequestCounts, createPO, updatePO, addUser, deleteUser, assignWarehouse, approveRequest: handleApproveRequest, declineRequest: handleDeclineRequest, addWarehouse: handleAddWarehouse, deleteWarehouse } = useAdminData();
+  const { warehouses, poVersion, requestVersion, userVersion, refreshStats, refreshRequestCounts, createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse, approveRequest: handleApproveRequest, declineRequest: handleDeclineRequest, addWarehouse: handleAddWarehouse, deleteWarehouse } = useAdminData();
 
   const [activeMenu, setActiveMenu] = useState('dashboard');
   const [selectedStat, setSelectedStat] = useState(null);
@@ -460,7 +460,7 @@ function AdminDashboard() {
         {activeMenu === 'requests' && renderRequests()}
         {activeMenu === 'settings' && renderSettings()}
       </div>
-      {showReceiptModal && selectedReceiptPo && <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />}
+      {showReceiptModal && selectedReceiptPo && <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />}
     </div>
   );
 }

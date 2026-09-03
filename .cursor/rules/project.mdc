@@ -1,0 +1,18 @@
+---
+description: CARDS project rules for Cursor
+globs: **/*
+alwaysApply: true
+---
+
+# CARDS Project Rules (lean pointer — detail lives in playbooks/)
+
+This file is a pointer, not a copy. Source of truth:
+
+- `AGENTS.md` — always-loaded lean guidance + key constraints
+- `RULES.md` — lazy `concern → playbook §` index; read only the § you need
+- `CONTEXT.md` — full project snapshot (stack, schema, commands, patterns)
+- `playbooks/` — rule detail (Next.js, Supabase, Zod, TanStack Query, testing, coding rules)
+
+Load order per task: `AGENTS.md` → `RULES.md` → one `playbooks/` §. Never read all playbooks eagerly.
+
+Quick constraints: Server Components default; Server Actions for mutations; Zod at boundaries; server-side authorization; service-role key never on the client; Prisma DateTime/enums/explicit `warehouseId` FKs.

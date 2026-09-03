@@ -11,21 +11,20 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const initSession = async () => {
+      try {
+        const session = await getSession();
+        if (session) {
+          setUser(session);
+          setIsLoggedIn(true);
+        }
+      } catch {
+      } finally {
+        setLoading(false);
+      }
+    };
     initSession();
   }, []);
-
-  const initSession = async () => {
-    try {
-      const session = await getSession();
-      if (session) {
-        setUser(session);
-        setIsLoggedIn(true);
-      }
-    } catch (e) {
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const login = useCallback(async ({ username, password }) => {
     const result = await serverLogin(username, password);

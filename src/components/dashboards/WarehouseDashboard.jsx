@@ -13,8 +13,8 @@ function WarehouseDashboard() {
   const [selectedPoType, setSelectedPoType] = useState('completed');
   const [poSearchQuery, setPoSearchQuery] = useState('');
 
-  const { data: purchaseOrders, loading: posLoading, loadMore: loadMorePOs, hasMore: hasMorePOs } = useInfiniteRows(getPOs, 10);
-  const { data: requestsList, loading: reqLoading, loadMore: loadMoreRequests, hasMore: hasMoreRequests } = useInfiniteRows(getRequests, 10);
+  const { rows: purchaseOrders, initialLoading: posLoading, loadMore: loadMorePOs, hasMore: hasMorePOs } = useInfiniteRows(getPOs, {});
+  const { rows: requestsList, initialLoading: reqLoading, loadMore: loadMoreRequests, hasMore: hasMoreRequests } = useInfiniteRows(getRequests, {});
 
   const [newRequestModal, setNewRequestModal] = useState(false);
   const [reqItemDescription, setReqItemDescription] = useState('');

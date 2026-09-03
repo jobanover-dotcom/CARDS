@@ -42,10 +42,15 @@ export function useInfiniteRows(fetcher, params = {}, version = 0) {
     [fetcher, params]
   );
 
+  // Fetch-on-params-change is this hook's contract: deps are keyed on the
+  // serialized paramsKey/version (caller param objects are re-created each
+  // render, so fetcher/params identity is not a stable signal).
+  // TanStack Query is the long-term replacement (see playbooks/).
+  /* eslint-disable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect -- fetch effect by design */
   useEffect(() => {
     load({ replace: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paramsKey, version]);
+  /* eslint-enable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
 
   const loadMore = useCallback(() => {
     if (!initialLoading && !loadingMore && rows.length < total) {

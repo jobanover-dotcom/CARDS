@@ -3,8 +3,6 @@ import { getPurchaseOrders } from '../services/api';
 
 export function useFetchPOs() {
   const [purchaseOrders, setPurchaseOrders] = useState(getPurchaseOrders);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
 
   const addPurchaseOrder = (newPO) => {
     setPurchaseOrders(prev => [...prev, newPO]);
@@ -32,7 +30,5 @@ export function useFetchPOs() {
     addPurchaseOrder,
     updatePurchaseOrder,
     getStats,
-    loading,
-    error,
   };
 }

@@ -13,7 +13,7 @@ import { getPOs } from '../../../actions/pos';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function PurchaseOrderContent() {
-  const { stats, poVersion } = useAdminData();
+  const { stats, poVersion, deletePO } = useAdminData();
   const searchParams = useSearchParams();
   const [selectedPoType, setSelectedPoType] = useState('all');
   const [poSearchInput, setPoSearchInput] = useState('');
@@ -165,7 +165,7 @@ function PurchaseOrderContent() {
       )}
 
       {showReceiptModal && selectedReceiptPo && (
-        <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
+        <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
       )}
     </div>
   );

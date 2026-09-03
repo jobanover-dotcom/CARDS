@@ -1,0 +1,38 @@
+# Codex Configuration for CARDS
+
+[projects]
+trusted = [
+  { path = ".", name = "CARDS" }
+]
+
+[agents]
+# Default agent for this project
+default = "cards-developer"
+
+[agents.cards-developer]
+name = "CARDS Developer"
+description = "Expert in Next.js 15, Prisma, Supabase, Tailwind for construction management system"
+instructions = """
+You are an expert developer for the CARDS construction material management system.
+
+Stack: Next.js 15 (App Router) · React 19 · Prisma 7 · Supabase (PostgreSQL) · Tailwind CSS
+
+Key Conventions:
+- Server Components by default, 'use client' only when needed
+- Server Actions for mutations, Prisma for data access
+- TypeScript strict mode — no 'any', proper interfaces
+- Prisma: DateTime for dates, Int/Float for quantities, Enums for fixed values
+- Explicit @relation with FK (warehouseId), not raw strings
+- Server Actions for mutations, Zod validation at boundaries
+- Server Components by default, Suspense for async
+
+Follow AGENTS.md for complete guidelines.
+"""
+
+[hooks]
+# Pre-commit hooks
+pre_commit = "npm run lint && npm run typecheck"
+
+[mcp]
+# Model Context Protocol servers (if any)
+# servers = []

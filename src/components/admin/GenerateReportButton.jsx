@@ -1,17 +1,42 @@
 'use client';
 import React, { useState } from 'react';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 
-function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeActiveDelivery = false) {
-  const wb = XLSX.utils.book_new();
+const argb = (rgb) => `FF${rgb}`;
+const thinSide = (rgb) => ({ style: 'thin', color: { argb: argb(rgb) } });
+const thinBorder = (rgb) => {
+  const side = thinSide(rgb);
+  return { top: side, left: side, bottom: side, right: side };
+};
 
-  const headerStyle = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1E3C72' } }, alignment: { horizontal: 'center', wrapText: true }, border: { all: { style: 'thin', color: { rgb: '999999' } } } };
-  const greenHeaderStyle = { ...headerStyle, fill: { fgColor: { rgb: '2E7D32' } } };
-  const summaryLabelStyle = { font: { bold: true, color: { rgb: '333333' } }, fill: { fgColor: { rgb: 'E3F2FD' } }, alignment: { horizontal: 'right' }, border: { all: { style: 'thin', color: { rgb: 'CCCCCC' } } } };
-  const summaryValueStyle = { font: { bold: true, color: { rgb: '1E3C72' } }, fill: { fgColor: { rgb: 'E3F2FD' } }, alignment: { horizontal: 'left' }, border: { all: { style: 'thin', color: { rgb: 'CCCCCC' } } } };
-  const cellStyle = { alignment: { horizontal: 'left', wrapText: true }, border: { all: { style: 'thin', color: { rgb: 'DDDDDD' } } } };
-  const centerStyle = { ...cellStyle, alignment: { horizontal: 'center' } };
-  const discrepancyStyle = { ...cellStyle, font: { color: { rgb: 'D32F2F' }, bold: true }, fill: { fgColor: { rgb: 'FFF5F5' } } };
+async function downloadWorkbook(wb, filename) {
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeActiveDelivery = false) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Purchase Order Report');
+
+  const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } };
+  const headerFillBlue = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3C72' } };
+  const headerFillGreen = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E7D32' } };
+  const summaryFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE3F2FD' } };
+  const headerStyle = { font: headerFont, fill: headerFillBlue, alignment: { horizontal: 'center', wrapText: true }, border: thinBorder('999999') };
+  const greenHeaderStyle = { ...headerStyle, fill: headerFillGreen };
+  const summaryLabelStyle = { font: { bold: true, color: { argb: 'FF333333' } }, fill: summaryFill, alignment: { horizontal: 'right' }, border: thinBorder('CCCCCC') };
+  const summaryValueStyle = { font: { bold: true, color: { argb: 'FF1E3C72' } }, fill: summaryFill, alignment: { horizontal: 'left' }, border: thinBorder('CCCCCC') };
+  const cellStyle = { alignment: { horizontal: 'left', wrapText: true }, border: thinBorder('DDDDDD') };
+  const centerStyle = { alignment: { horizontal: 'center' }, border: thinBorder('DDDDDD') };
+  const discrepancyStyle = { ...cellStyle, font: { color: { argb: 'FFD32F2F' }, bold: true }, fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF5F5' } } };
 
   const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by'];
   const monHeaders = ['PO number', 'Pick-up date', 'Item Description', 'Qty. rvd', 'Unit', 'Delivered By', 'Date delivered', 'Reference No.', 'DR date', 'Pick-up By'];
@@ -72,69 +97,62 @@ function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeAct
     wsData.push(rowData);
   });
 
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-
-  ws['!cols'] = [
-    { wch: 12 }, { wch: 14 }, { wch: 22 }, { wch: 8 }, { wch: 8 },
-    { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 14 },
-    { wch: 14 }, { wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 8 },
-    { wch: 18 }, { wch: 16 }, { wch: 16 }, { wch: 12 }, { wch: 14 },
-    { wch: 16 },
+  ws.columns = [
+    { width: 12 }, { width: 14 }, { width: 22 }, { width: 8 }, { width: 8 },
+    { width: 18 }, { width: 18 }, { width: 12 }, { width: 14 }, { width: 14 },
+    { width: 14 }, { width: 14 }, { width: 22 }, { width: 10 }, { width: 8 },
+    { width: 18 }, { width: 16 }, { width: 16 }, { width: 12 }, { width: 14 },
+    { width: 16 },
   ];
+  wsData.forEach((row) => ws.addRow(row));
 
-  const dataStartRow = 7;
-  allHeaders.forEach((_, i) => {
-    const ref = XLSX.utils.encode_cell({ r: dataStartRow, c: i });
-    if (ws[ref]) {
-      if (i < poHeaders.length) {
-        ws[ref].s = headerStyle;
-      } else if (i < poHeaders.length + monHeaders.length) {
-        ws[ref].s = greenHeaderStyle;
-      } else {
-        ws[ref].s = headerStyle;
-      }
+  const dataStartRow = 8;
+  const headerRow = ws.getRow(dataStartRow);
+  headerRow.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+    const i = colNumber - 1;
+    if (i < poHeaders.length) {
+      Object.assign(cell, headerStyle);
+    } else if (i < poHeaders.length + monHeaders.length) {
+      Object.assign(cell, greenHeaderStyle);
+    } else {
+      Object.assign(cell, headerStyle);
     }
   });
 
-  for (let r = 1; r < 7; r++) {
-    for (let c = 0; c < 4; c++) {
-      const ref = XLSX.utils.encode_cell({ r, c });
-      if (ws[ref]) {
-        if (c === 0) ws[ref].s = summaryLabelStyle;
-        else ws[ref].s = summaryValueStyle;
-      }
-    }
+  for (let r = 2; r <= 7; r++) {
+    const row = ws.getRow(r);
+    row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      if (colNumber > 4) return;
+      if (colNumber === 1) Object.assign(cell, summaryLabelStyle);
+      else Object.assign(cell, summaryValueStyle);
+    });
   }
 
-  const mergeEndCol = includeActiveDelivery ? 20 : 19;
-  ws['!merges'] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: mergeEndCol } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: mergeEndCol } },
-  ];
+  const mergeEndCol = includeActiveDelivery ? 21 : 20;
+  ws.mergeCells(1, 1, 1, mergeEndCol);
+  ws.mergeCells(3, 1, 3, mergeEndCol);
 
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
-  for (let i = dataStartRow + 1; i < rows.length; i++) {
-    const po = orders[i - dataStartRow - 1];
+  const totalRows = ws.rowCount;
+  for (let r = dataStartRow + 1; r <= totalRows; r++) {
+    const po = orders[r - dataStartRow - 1];
     if (!po) continue;
     const isDiscrepancy = po.monQtyRvd && po.monQtyRvd !== '' && parseInt(po.monQtyRvd) !== po.qty;
-    for (let c = 0; c < allHeaders.length; c++) {
-      const ref = XLSX.utils.encode_cell({ r: i, c });
-      if (ws[ref]) {
-        if (isDiscrepancy && c >= poHeaders.length && c < poHeaders.length + monHeaders.length) {
-          ws[ref].s = discrepancyStyle;
-        } else {
-          ws[ref].s = cellStyle;
-          if (c === 3 || c === 4 || c === 13 || c === 14) ws[ref].s = centerStyle;
-        }
+    const row = ws.getRow(r);
+    row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
+      const c = colNumber - 1;
+      if (c >= allHeaders.length) return;
+      if (isDiscrepancy && c >= poHeaders.length && c < poHeaders.length + monHeaders.length) {
+        Object.assign(cell, discrepancyStyle);
+      } else {
+        if (c === 3 || c === 4 || c === 13 || c === 14) Object.assign(cell, centerStyle);
+        else Object.assign(cell, cellStyle);
       }
-    }
+    });
   }
-
-  XLSX.utils.book_append_sheet(wb, ws, 'Purchase Order Report');
 
   const now = new Date();
   const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-  XLSX.writeFile(wb, `Purchase_Order_Report_${ts}.xlsx`);
+  await downloadWorkbook(wb, `Purchase_Order_Report_${ts}.xlsx`);
 }
 
 function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
@@ -157,7 +175,7 @@ function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
       const finalTotal = finalOrders.length;
       const finalCompleted = finalOrders.filter(o => o.status === 'completed').length;
       const finalIncomplete = finalOrders.filter(o => o.status === 'incomplete').length;
-      generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete, includeActiveDelivery);
+      await generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete, includeActiveDelivery);
       setShowConfirmModal(false);
     } catch (e) {
       alert('Failed to generate report: ' + e.message);

@@ -11,7 +11,7 @@ import { getRequests } from '../../../actions/requests';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function HistoryView() {
-  const { stats, requestCounts, poVersion, requestVersion } = useAdminData();
+  const { stats, requestCounts, poVersion, requestVersion, deletePO } = useAdminData();
   const [historyTab, setHistoryTab] = useState('purchase-orders');
   const [historySearchInput, setHistorySearchInput] = useState('');
   const [historySearchQuery, setHistorySearchQuery] = useState('');
@@ -253,7 +253,7 @@ function HistoryView() {
       </div>
 
       {showReceiptModal && selectedReceiptPo && (
-        <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
+        <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
       )}
 
       {showRemarksModal && (

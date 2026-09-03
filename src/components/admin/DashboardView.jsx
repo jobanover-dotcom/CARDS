@@ -14,7 +14,7 @@ import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function DashboardView() {
-  const { warehouses, poVersion } = useAdminData();
+  const { warehouses, poVersion, deletePO } = useAdminData();
   const [selectedStat, setSelectedStat] = useState(null);
   const [dashboardSearchInput, setDashboardSearchInput] = useState('');
   const [dashboardSearchQuery, setDashboardSearchQuery] = useState('');
@@ -201,7 +201,7 @@ function DashboardView() {
       </div>
 
       {showReceiptModal && selectedReceiptPo && (
-        <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
+        <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
       )}
     </div>
   );

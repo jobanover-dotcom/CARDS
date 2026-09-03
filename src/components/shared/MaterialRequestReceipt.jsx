@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { useAdminData } from '../../context/AdminDataContext';
 
 function getStatusDisplay(po) {
   if (po.statusLabel) {
@@ -79,20 +78,19 @@ function markAsViewed(poNumber) {
   }
 }
 
-function MaterialRequestReceipt({ po, onClose }) {
+function MaterialRequestReceipt({ po, onClose, onDelete }) {
   const [showNewRequest, setShowNewRequest] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
   const { user } = useAuth();
-  const { deletePO } = useAdminData();
-  const isSuperadmin = user?.role === 'Superadmin';
+  const isSuperadmin = user?.role === 'Superadmin' && typeof onDelete === 'function';
 
   const handleDeletePO = async () => {
     if (!window.confirm(`Are you sure you want to permanently delete PO ${po.poNumber}? This action cannot be undone.`)) return;
     setDeleting(true);
     setError(null);
     try {
-      await deletePO(po.poNumber);
+      await onDelete(po.poNumber);
       onClose();
     } catch (e) {
       setError(e.message || 'Failed to delete purchase order');
