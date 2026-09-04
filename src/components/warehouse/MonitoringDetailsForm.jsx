@@ -1,100 +1,78 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useWarehouseData } from '../../context/WarehouseDataContext';
 import CreateRequestModal from './CreateRequestModal';
 
 function MonitoringDetailsForm({ po, onClose }) {
-  const { updatePO } = useWarehouseData();
-  const [monPoNumber] = useState(po.poNumber || '');
-  const [monPickupDate] = useState(() => {
-    const value = po.date || '';
-    if (!value) return '';
-    const parts = value.split('-');
-    if (parts.length !== 3) return '';
-    let [month, day, year] = parts;
-    if (year.length === 2) year = `20${year}`;
-    month = month.padStart(2, '0');
-    day = day.padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  });
-  const [monDescription] = useState((po.items || []).map((i) => i.itemDescription).join(', '));
-  const [monQtyRvd, setMonQtyRvd] = useState('');
-  const [monUnit] = useState(po.items?.length === 1 ? po.items[0].unit : (po.items?.length ? 'various' : ''));
-  const [monDeliveredBy, setMonDeliveredBy] = useState('');
-  const [monDateDelivered, setMonDateDelivered] = useState('');
-  const [monReferenceNo, setMonReferenceNo] = useState('');
-  const [monDrDate, setMonDrDate] = useState('');
-  const [monPickupBy, setMonPickupBy] = useState(po.pickupBy || '');
-  const [monRemarks, setMonRemarks] = useState('');
+  const { updatePOMonitoring } = useWarehouseData();
+  const poItems = po.items || [];
+  const existing = useMemo(() => Object.fromEntries(poItems.map((item) => {
+    const row = (item.monitoringItems || []).find((m) => m.poItemId === item.id);
+    return [item.id, String(row?.qtyReceived ?? 0)];
+  })), [poItems]);
+  const [received, setReceived] = useState(existing);
+  const [deliveredBy, setDeliveredBy] = useState(po.monDeliveredBy || '');
+  const [plateNumber, setPlateNumber] = useState(po.monPlateNumber || '');
+  const [dateDelivered, setDateDelivered] = useState(po.monDateDelivered || '');
+  const [referenceNo, setReferenceNo] = useState(po.monReferenceNo || '');
+  const [drDate, setDrDate] = useState(po.monDrDate || '');
+  const [remarks, setRemarks] = useState(po.monRemarks || '');
   const [markAsDiscrepancy, setMarkAsDiscrepancy] = useState(po.poType === 'discrepancy');
-  const [showMonSuccess, setShowMonSuccess] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [showFollowUpModal, setShowFollowUpModal] = useState(false);
   const [followUpPo, setFollowUpPo] = useState(null);
 
-  const totalOrdered = (po.items || []).reduce((s, it) => s + it.qty, 0);
-  const qtyReceivedValue = parseInt(monQtyRvd) || 0;
-  const shortfall = Math.max(0, totalOrdered - qtyReceivedValue);
-  const hasShortfall = shortfall > 0 && monQtyRvd;
+  const totals = poItems.reduce((acc, item) => {
+    const qty = Number(received[item.id] || 0);
+    acc.ordered += item.qty;
+    acc.received += qty;
+    acc.balance += Math.max(0, item.qty - qty);
+    return acc;
+  }, { ordered: 0, received: 0, balance: 0 });
 
-  const isDiscrepancyRequired = markAsDiscrepancy && !monRemarks.trim();
+  const handleQtyChange = (item, value) => {
+    const raw = value.replace(/[^0-9]/g, '');
+    const qty = raw === '' ? '' : Math.min(Number(raw), item.qty);
+    setReceived((prev) => ({ ...prev, [item.id]: String(qty) }));
+  };
 
   const handleSave = async (e) => {
     e.preventDefault();
-    if (!monQtyRvd || !monDeliveredBy || !monDateDelivered || !monReferenceNo || !monDrDate) {
-      alert('Please fill in all required fields');
+    setSaveError(null);
+    if (!deliveredBy.trim() || !plateNumber.trim() || !dateDelivered || !referenceNo.trim() || !drDate) {
+      setSaveError('Please fill in Delivered By, Plate Number, Date Delivered, Reference No., and DR Date.');
       return;
+    }
+    for (const item of poItems) {
+      const qty = Number(received[item.id]);
+      if (!Number.isInteger(qty) || qty < 0) {
+        setSaveError(`Received quantity for "${item.itemDescription}" must be a whole number of 0 or more.`); return;
+      }
+      if (qty > item.qty) {
+        setSaveError(`Received quantity for "${item.itemDescription}" cannot exceed ${item.qty} ${item.unit}.`); return;
+      }
+    }
+    if (markAsDiscrepancy && !remarks.trim()) {
+      setSaveError('Discrepancy remarks are required before saving this PO.'); return;
     }
     if (saving) return;
 
-    const qtyReceived = parseInt(monQtyRvd) || 0;
-    const originalQty = (po.items || []).reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
-    if (qtyReceived < 1) {
-      setSaveError('Qty received must be a positive number.');
-      return;
-    }
-    if (markAsDiscrepancy && !monRemarks.trim()) {
-      setSaveError('Discrepancy remarks are required before saving this PO.');
-      return;
-    }
-
-    const hasDiscrepancy = markAsDiscrepancy || qtyReceived !== originalQty;
-    const finalStatus = hasDiscrepancy ? 'incomplete' : 'completed';
-    const finalPoType = hasDiscrepancy && !markAsDiscrepancy ? 'partially-received' : (hasDiscrepancy ? 'discrepancy' : 'completed');
-    const finalStatusLabel = hasDiscrepancy && !markAsDiscrepancy ? `Partially Received (${qtyReceived}/${totalOrdered})` : (hasDiscrepancy ? 'Discrepancy' : 'Completed');
-
     setSaving(true);
-    setSaveError(null);
     try {
-      await updatePO(po.poNumber, {
-        status: finalStatus,
-        poType: finalPoType,
-        statusLabel: finalStatusLabel,
-        pickupBy: monPickupBy,
-        poExpDate: monDateDelivered,
-        supplierAddress: po.supplierAddress || 'Davao City',
-        notes: monRemarks || po.notes,
-        monQtyRvd,
-        monDeliveredBy,
-        monDateDelivered,
-        monReferenceNo,
-        monDrDate,
-        monRemarks,
+      const result = await updatePOMonitoring(po.poNumber, {
+        items: poItems.map((item) => ({ poItemId: item.id, qtyReceived: Number(received[item.id]) })),
+        deliveredBy: deliveredBy.trim(), plateNumber: plateNumber.trim(),
+        dateDelivered, referenceNo: referenceNo.trim(), drDate,
+        remarks: remarks.trim(), markAsDiscrepancy,
       });
-      setShowMonSuccess(true);
-
-      // If there's a shortfall, show the follow-up modal after success
-      if (hasShortfall) {
-        setTimeout(() => {
-          setFollowUpPo({ ...po, monQtyRvd });
-          setShowFollowUpModal(true);
-        }, 1500);
+      setShowSuccess(true);
+      if (result.anyShortfall) {
+        setFollowUpPo(result.po);
+        setTimeout(() => setShowFollowUpModal(true), 800);
       } else {
-        setTimeout(() => {
-          setShowMonSuccess(false);
-          onClose();
-        }, 2000);
+        setTimeout(() => { setShowSuccess(false); onClose(); }, 1500);
       }
     } catch (err) {
       setSaveError(err?.message || 'Failed to save monitoring details. Please try again.');
@@ -103,146 +81,47 @@ function MonitoringDetailsForm({ po, onClose }) {
     }
   };
 
-  const inputClass = "py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border";
+  const inputClass = 'py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border';
 
-  return (
-    <>
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in overflow-y-auto py-6 px-4">
-      <div className="bg-white rounded-xl w-full max-w-[500px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 relative font-sans text-left">
-        <button
-          className="absolute top-4 right-4 bg-none border-none text-2xl cursor-pointer text-[#888] hover:text-[#333] transition-colors duration-200 p-1 leading-none"
-          onClick={onClose}
-        >
-          X
-        </button>
-
-        <h2 className="m-0 text-lg font-bold text-[#333] mb-5 tracking-wide">Monitoring Details</h2>
-
-        {showMonSuccess && (
-          <div className="mb-4 p-3 bg-[#e8f5e9] text-[#2e7d32] border border-[#a5d6a7] rounded-md text-xs font-bold flex items-center justify-center gap-1.5 animate-pulse">
-            <span>&#10003; Saved successfully!</span>
-          </div>
-        )}
-
-        {hasShortfall && !showMonSuccess && (
-          <div className="mb-4 p-3 bg-[#fff3e0] text-[#e65100] border border-[#ffb74d] rounded-md text-xs font-bold">
-            ⚠️ Shortfall detected: {shortfall} item(s) not received. You&apos;ll be able to file a follow-up after saving.
-          </div>
-        )}
+  return <>
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] overflow-y-auto py-6 px-4">
+      <div className="bg-white rounded-xl w-full max-w-[620px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
+        <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5"><h2 className="m-0 text-lg font-bold text-[#333]">Monitoring Details</h2><button className="text-2xl text-[#888]" onClick={onClose}>X</button></div>
+        {showSuccess && <div className="mb-4 p-3 bg-[#e8f5e9] text-[#2e7d32] border border-[#a5d6a7] rounded-md text-xs font-bold">✓ Monitoring details saved successfully.</div>}
+        {saveError && <div className="mb-4 p-3 bg-[#ffebee] text-[#c62828] border border-[#ef9a9a] rounded-md text-xs font-semibold">{saveError}</div>}
 
         <form onSubmit={handleSave} className="flex flex-col gap-4">
-          <div className="flex gap-4">
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>PO number:</label>
-              <input type="text" value={monPoNumber} disabled className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#555] bg-gray-50 w-full box-border" />
+          <div className="grid grid-cols-2 gap-4"><div><label className="text-[11px] font-bold text-[#444]">PO NUMBER</label><input value={po.poNumber || ''} disabled className={`${inputClass} bg-gray-50`} /></div><div><label className="text-[11px] font-bold text-[#444]">PO DATE</label><input value={po.date || ''} disabled className={`${inputClass} bg-gray-50`} /></div></div>
+
+          <div className="border border-[#eee] rounded-lg p-3">
+            <div className="flex justify-between items-center mb-3"><h3 className="m-0 text-xs font-bold text-[#555] uppercase tracking-wide">ITEM RECEIPT DETAILS</h3><span className="text-[10px] text-[#777]">Maximum = ordered quantity</span></div>
+            <div className="flex flex-col gap-3">
+              {poItems.map((item) => {
+                const qty = Number(received[item.id] || 0);
+                const balance = Math.max(0, item.qty - qty);
+                return <div key={item.id} className="grid grid-cols-[1.8fr_.7fr_.9fr_.9fr] gap-2 items-end border-b border-[#f1f1f1] pb-3 last:border-b-0 last:pb-0">
+                  <div><label className="text-[10px] font-bold text-[#999]">MATERIAL</label><div className="text-[13px] font-medium text-[#333]">{item.itemDescription} <span className="text-[10px] text-[#888]">({item.unit})</span></div></div>
+                  <div><label className="text-[10px] font-bold text-[#999]">ORDERED</label><div className="text-[13px] font-semibold">{item.qty}</div></div>
+                  <div><label className="text-[10px] font-bold text-[#444]">QTY RECEIVED</label><input type="number" min="0" max={item.qty} step="1" value={received[item.id] ?? ''} onChange={(e) => handleQtyChange(item, e.target.value)} className={`${inputClass} ${qty >= item.qty ? 'bg-[#f5f5f5]' : ''}`} /></div>
+                  <div><label className="text-[10px] font-bold text-[#999]">BALANCE</label><div className={`text-[13px] font-bold ${balance ? 'text-[#e65100]' : 'text-[#2e7d32]'}`}>{balance}</div></div>
+                </div>;
+              })}
             </div>
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Pick-up date:</label>
-              <input type="date" value={monPickupDate} disabled className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#555] bg-gray-50 w-full box-border" />
-            </div>
+            <div className="mt-3 pt-3 border-t border-[#eee] flex justify-between text-[11px] font-bold text-[#555]"><span>Total ordered: {totals.ordered}</span><span>Total received: {totals.received}</span><span>Total balance: {totals.balance}</span></div>
           </div>
 
-          <div className="flex gap-4 items-end">
-            <div className="flex flex-col gap-1.5 flex-[3] text-[11px] font-bold text-[#444]">
-              <label>Item Description:</label>
-              <input type="text" value={monDescription} disabled className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#555] bg-gray-50 w-full box-border" />
-            </div>
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Qty. rvd.:</label>
-              <input type="number" value={monQtyRvd} onChange={(e) => setMonQtyRvd(e.target.value)} placeholder="0" required className={`py-2 px-3 border rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border ${hasShortfall ? 'border-[#ff9800] bg-[#fff8e1]' : 'border-[#ccc]'}`} />
-            </div>
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Unit:</label>
-              <input type="text" value={monUnit} disabled className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#555] bg-gray-50 w-full box-border" />
-            </div>
-          </div>
+          <div className="grid grid-cols-2 gap-4"><div><label className="text-[11px] font-bold text-[#444]">DELIVERED BY *</label><input value={deliveredBy} onChange={(e) => setDeliveredBy(e.target.value)} placeholder="Enter name" required className={inputClass} /></div><div><label className="text-[11px] font-bold text-[#444]">PLATE NUMBER *</label><input value={plateNumber} onChange={(e) => setPlateNumber(e.target.value)} placeholder="Enter plate number" required className={inputClass} /></div></div>
+          <div className="grid grid-cols-2 gap-4"><div><label className="text-[11px] font-bold text-[#444]">DATE DELIVERED *</label><input type="date" value={dateDelivered} onChange={(e) => setDateDelivered(e.target.value)} required className={inputClass} /></div><div><label className="text-[11px] font-bold text-[#444]">REFERENCE NO. *</label><input value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} required className={inputClass} /></div></div>
+          <div className="grid grid-cols-2 gap-4"><div><label className="text-[11px] font-bold text-[#444]">DR DATE *</label><input type="date" value={drDate} onChange={(e) => setDrDate(e.target.value)} required className={inputClass} /></div><div><label className="text-[11px] font-bold text-[#444]">REMARKS</label><input value={remarks} onChange={(e) => setRemarks(e.target.value)} className={inputClass} /></div></div>
 
-          <div className="flex gap-4">
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Delivered By:</label>
-              <input type="text" value={monDeliveredBy} onChange={(e) => setMonDeliveredBy(e.target.value)} placeholder="Enter name" required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
-            </div>
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Date delivered:</label>
-              <input type="date" value={monDateDelivered} onChange={(e) => setMonDateDelivered(e.target.value)} required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
-            </div>
-          </div>
-
-          <div className="flex gap-4 items-end">
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Reference No.</label>
-              <input type="text" value={monReferenceNo} onChange={(e) => setMonReferenceNo(e.target.value)} placeholder="00000" required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
-            </div>
-            <div className="flex flex-col gap-1.5 flex-[0.8] text-[11px] font-bold text-[#444]">
-              <label>DR date:</label>
-              <input type="date" value={monDrDate} onChange={(e) => setMonDrDate(e.target.value)} required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
-            </div>
-            <div className="flex flex-col gap-1.5 flex-[1.2] text-[11px] font-bold text-[#444]">
-              <label>Pick-up By:</label>
-              <input type="text" value={monPickupBy} onChange={(e) => setMonPickupBy(e.target.value)} placeholder="Enter name" required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
-            </div>
-          </div>
-
-          {saveError && (
-            <div className="mb-4 px-3 py-2 rounded-md text-xs font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">
-              {saveError}
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 pt-1">
-            <input
-              id="mark-discrepancy"
-              type="checkbox"
-              checked={markAsDiscrepancy}
-              onChange={(e) => setMarkAsDiscrepancy(e.target.checked)}
-              className="h-4 w-4 rounded border-[#b0bec5] text-[#d32f2f] focus:ring-[#d32f2f]"
-            />
-            <label htmlFor="mark-discrepancy" className="text-[11px] font-bold text-[#444]">Mark as discrepancy</label>
-          </div>
-
-          {markAsDiscrepancy && (
-            <div className="px-3 py-2 rounded-md border border-[#ef9a9a] bg-[#ffebee] text-[#c62828] text-[11px] font-semibold">
-              Please add a remark explaining the discrepancy before saving this PO.
-            </div>
-          )}
-
-          <div className="flex gap-4 items-end">
-            <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
-              <label>Remarks:</label>
-              <textarea
-                value={monRemarks}
-                onChange={(e) => setMonRemarks(e.target.value)}
-                placeholder="Enter remarks.."
-                className={`py-2 px-3 border rounded-md text-[13px] text-[#333] focus:outline-none w-full box-border resize-none h-[80px] ${markAsDiscrepancy && !monRemarks.trim() ? 'border-[#d32f2f] bg-[#fff5f5] focus:border-[#d32f2f]' : 'border-[#ccc] focus:border-[#006680]'}`}
-              />
-            </div>
-            <div className="flex flex-col gap-2.5">
-              <button
-                type="submit"
-                disabled={saving || isDiscrepancyRequired}
-                className="py-2.5 px-8 bg-[#006680] text-white border-none rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#004d60] w-[120px] disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button type="button" onClick={onClose} className="py-2.5 px-8 bg-white text-[#d32f2f] border border-[#d32f2f] rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff5f5] w-[120px]">Cancel</button>
-            </div>
-          </div>
+          <div className="flex items-center gap-2"><input id="mark-discrepancy" type="checkbox" checked={markAsDiscrepancy} onChange={(e) => setMarkAsDiscrepancy(e.target.checked)} /><label htmlFor="mark-discrepancy" className="text-[11px] font-bold text-[#444]">Mark as discrepancy</label></div>
+          {markAsDiscrepancy && <div className="px-3 py-2 rounded-md border border-[#ef9a9a] bg-[#ffebee] text-[#c62828] text-[11px] font-semibold">Add a remark explaining the discrepancy before saving.</div>}
+          <div className="flex justify-end gap-3 mt-2 pt-4 border-t border-[#eee]"><button type="button" onClick={onClose} className="py-2.5 px-6 bg-white text-[#d32f2f] border border-[#d32f2f] rounded-md">Cancel</button><button type="submit" disabled={saving} className="py-2.5 px-6 bg-[#006680] text-white rounded-md disabled:opacity-60">{saving ? 'Saving…' : 'Save'}</button></div>
         </form>
       </div>
     </div>
-
-    {showFollowUpModal && followUpPo && (
-      <CreateRequestModal
-        followUpPo={followUpPo}
-        onClose={() => {
-          setShowFollowUpModal(false);
-          setShowMonSuccess(false);
-          onClose();
-        }}
-      />
-    )}
-    </>
-  );
+    {showFollowUpModal && followUpPo && <CreateRequestModal followUpPo={followUpPo} onClose={() => { setShowFollowUpModal(false); setShowSuccess(false); onClose(); }} />}
+  </>;
 }
 
 export default MonitoringDetailsForm;
