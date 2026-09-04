@@ -3,6 +3,12 @@
 import { prisma } from '@/lib/prisma';
 import { getCurrentUser } from './auth';
 
+export interface RequestItemInput {
+  itemDescription: string;
+  qty: number;
+  unit: string;
+}
+
 export interface RequestQuery {
   offset?: number;
   limit?: number;
@@ -18,7 +24,7 @@ function buildRequestWhere(user: { role: string; warehouse: string } | null, par
   if (params.search) {
     where.OR = [
       { mrsNo: { contains: params.search, mode: 'insensitive' } },
-      { itemDescription: { contains: params.search, mode: 'insensitive' } },
+      { items: { some: { itemDescription: { contains: params.search, mode: 'insensitive' } } } },
     ];
   }
   return where;
@@ -31,6 +37,7 @@ export async function getRequests(params: RequestQuery = {}) {
   const [rows, total] = await prisma.$transaction([
     prisma.warehouseRequest.findMany({
       where,
+      include: { items: true },
       orderBy: { createdAt: 'desc' },
       skip: params.offset ?? 0,
       take: params.limit ?? 10,
@@ -56,22 +63,54 @@ export async function getRequestCounts() {
 }
 
 export async function createRequest(data: {
-  date: string; reqNumber: string; itemDescription: string;
-  qty: number; unit: string; mrsNo: string; requestedBy: string;
-  requisitioner: string; followUpOfReqNumber?: string | null;
+  date: string; reqNumber: string; items: RequestItemInput[];
+  mrsNo: string; requestedBy: string;
+  requisitioner: string; followUpOfReqNumber?: string | null; followUpOfPoNumber?: string | null;
 }) {
   const user = await getCurrentUser();
   if (!user) throw new Error('Unauthorized');
-  if (!Number.isFinite(data.qty) || data.qty < 1) {
-    throw new Error('Quantity must be a positive number');
+  if (!Array.isArray(data.items) || data.items.length === 0) {
+    throw new Error('At least one item is required');
   }
+  for (const item of data.items) {
+    if (!item.itemDescription?.trim()) throw new Error('Every item needs a description');
+    if (!Number.isFinite(item.qty) || item.qty < 1) throw new Error('Every item quantity must be a positive number');
+  }
+  const { items, ...rest } = data;
+
+  // Anti-spam: at most one undecided follow-up per source. Only a
+  // rejection reopens a source for refiling.
+  const sourceNumber = (rest as { followUpOfReqNumber?: string | null; followUpOfPoNumber?: string | null }).followUpOfReqNumber
+    ?? (rest as { followUpOfPoNumber?: string | null }).followUpOfPoNumber;
+  if (sourceNumber) {
+    const field = (rest as { followUpOfReqNumber?: string | null }).followUpOfReqNumber
+      ? 'followUpOfReqNumber'
+      : 'followUpOfPoNumber';
+    const existing = await prisma.warehouseRequest.findFirst({
+      where: {
+        [field]: sourceNumber,
+        status: { in: ['Pending', 'Approved', 'Partially Approved'] },
+      },
+      select: { reqNumber: true, mrsNo: true, status: true },
+    });
+    if (existing) {
+      throw new Error(
+        `A follow-up (${existing.mrsNo}, ${existing.status}) already exists for this. Only a rejected follow-up can be refiled.`
+      );
+    }
+  }
+
   return prisma.warehouseRequest.create({
     data: {
-      ...data,
+      ...rest,
       warehouse: user?.warehouse || null,
       status: 'Pending',
       remarks: null,
+      items: {
+        create: items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })),
+      },
     },
+    include: { items: true },
   });
 }
 
@@ -84,25 +123,37 @@ async function assertElevated() {
 
 export async function approveRequest(reqNumber: string) {
   await assertElevated();
-  const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber } });
+  const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber }, include: { items: true } });
   if (!req) throw new Error('Request not found');
-  return prisma.warehouseRequest.update({
-    where: { reqNumber },
-    data: { status: 'Approved', approvedQty: req.qty },
+  return prisma.$transaction(async (tx) => {
+    await Promise.all(
+      req.items.map((it) => tx.warehouseRequestItem.update({ where: { id: it.id }, data: { approvedQty: it.qty } }))
+    );
+    return tx.warehouseRequest.update({ where: { reqNumber }, data: { status: 'Approved' } });
   });
 }
 
-export async function approveRequestPartial(reqNumber: string, approvedQty?: number) {
+export async function approveRequestPartial(
+  reqNumber: string,
+  itemApprovals?: { id: string; approvedQty: number }[]
+) {
   await assertElevated();
-  const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber } });
+  const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber }, include: { items: true } });
   if (!req) throw new Error('Request not found');
-  const qty = Math.max(0, Math.min(approvedQty ?? req.qty, req.qty));
-  return prisma.warehouseRequest.update({
-    where: { reqNumber },
-    data: {
-      approvedQty: qty,
-      status: qty >= req.qty ? 'Approved' : 'Partially Approved',
-    },
+  const approvalMap = new Map((itemApprovals || []).map((a) => [a.id, a.approvedQty]));
+
+  return prisma.$transaction(async (tx) => {
+    let allFull = true;
+    for (const item of req.items) {
+      const raw = approvalMap.has(item.id) ? approvalMap.get(item.id)! : item.qty;
+      const approvedQty = Math.max(0, Math.min(raw, item.qty));
+      if (approvedQty < item.qty) allFull = false;
+      await tx.warehouseRequestItem.update({ where: { id: item.id }, data: { approvedQty } });
+    }
+    return tx.warehouseRequest.update({
+      where: { reqNumber },
+      data: { status: allFull ? 'Approved' : 'Partially Approved' },
+    });
   });
 }
 
@@ -112,4 +163,40 @@ export async function declineRequest(reqNumber: string, remarks: string) {
     where: { reqNumber },
     data: { status: 'Rejected', remarks },
   });
+}
+
+export interface FollowUpInfo {
+  reqNumber: string;
+  mrsNo: string;
+  status: string;
+}
+
+/**
+ * Batched lookup of follow-up requests for a set of source numbers.
+ * Single query — avoids N+1 fetches from list views.
+ * Warehouse callers only see their own warehouse's follow-ups.
+ */
+export async function getFollowUpMap(
+  sourceNumbers: string[],
+  type: 'req' | 'po'
+): Promise<Record<string, FollowUpInfo[]>> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  if (!Array.isArray(sourceNumbers) || sourceNumbers.length === 0) return {};
+  const field = type === 'req' ? 'followUpOfReqNumber' : 'followUpOfPoNumber';
+  const rows = await prisma.warehouseRequest.findMany({
+    where: {
+      [field]: { in: sourceNumbers },
+      ...(user.role === 'Warehouse' ? { warehouse: user.warehouse } : {}),
+    },
+    select: { reqNumber: true, mrsNo: true, status: true, [field]: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  const map: Record<string, FollowUpInfo[]> = {};
+  for (const r of rows) {
+    const key = (r as Record<string, unknown>)[field] as string;
+    if (!key) continue;
+    (map[key] ??= []).push({ reqNumber: r.reqNumber, mrsNo: r.mrsNo, status: r.status });
+  }
+  return map;
 }

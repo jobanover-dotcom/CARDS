@@ -9,6 +9,7 @@ export function WarehouseDataProvider({ children }) {
   const [stats, setStats] = useState({
     totalPOs: 0, completedPOs: 0, incompletePOs: 0,
     activeDeliveryCount: 0, discrepancyCount: 0,
+    partiallyReceivedCount: 0,
   });
   const [loading, setLoading] = useState(true);
   const [poVersion, setPoVersion] = useState(0);
@@ -49,7 +50,8 @@ export function WarehouseDataProvider({ children }) {
       poVersion,
       requestVersion,
       completedCount: stats.completedPOs,
-      activeCount: stats.activeDeliveryIncompleteCount,
+      activeCount: (stats.incompletePOs || 0) - (stats.partiallyReceivedCount || 0),
+      partiallyReceivedCount: stats.partiallyReceivedCount || 0,
       refreshStats,
       updatePO, createRequest,
     }}>

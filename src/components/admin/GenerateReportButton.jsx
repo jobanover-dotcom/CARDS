@@ -58,12 +58,15 @@ async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, incl
   wsData.push(allHeaders);
 
   orders.forEach(order => {
+    const items = order.items || [];
+    const itemDescSummary = items.map(i => i.itemDescription).join('; ');
+    const qtySummary = items.map(i => `${i.qty} ${i.unit}`).join('; ');
     const poRow = [
       order.date,
       order.poNumber,
-      order.itemDescription,
-      order.qty,
-      order.unit,
+      itemDescSummary,
+      qtySummary,
+      '',
       order.supplier,
       order.requisitioner,
       order.mrsNo,
@@ -73,9 +76,9 @@ async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, incl
     const monRow = [
       order.poNumber,
       order.date,
-      order.itemDescription,
+      itemDescSummary,
       order.monQtyRvd || '',
-      order.unit,
+      '',
       order.monDeliveredBy || '',
       order.monDateDelivered || '',
       order.monReferenceNo || '',
@@ -136,7 +139,8 @@ async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, incl
   for (let r = dataStartRow + 1; r <= totalRows; r++) {
     const po = orders[r - dataStartRow - 1];
     if (!po) continue;
-    const isDiscrepancy = po.monQtyRvd && po.monQtyRvd !== '' && parseInt(po.monQtyRvd) !== po.qty;
+    const totalQty = (po.items || []).reduce((s, it) => s + (it.qty || 0), 0);
+    const isDiscrepancy = po.monQtyRvd && po.monQtyRvd !== '' && parseInt(po.monQtyRvd) !== totalQty;
     const row = ws.getRow(r);
     row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
       const c = colNumber - 1;

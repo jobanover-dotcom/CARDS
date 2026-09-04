@@ -40,11 +40,13 @@ function PurchaseOrderContent() {
 
   useEffect(() => {
     if (searchParams.get('openPOModal') === 'true') {
+      let items = [];
+      let itemApprovals = [];
+      try { items = JSON.parse(searchParams.get('items') || '[]'); } catch { items = []; }
+      try { itemApprovals = JSON.parse(searchParams.get('itemApprovals') || '[]'); } catch { itemApprovals = []; }
       setInitialFormData({
-        itemDescription: searchParams.get('itemDescription') || '',
-        qty: searchParams.get('qty') || '',
-        requestedQty: searchParams.get('requestedQty') || '',
-        unit: searchParams.get('unit') || 'pcs',
+        items,
+        itemApprovals,
         requisitioner: searchParams.get('requisitioner') || '',
         mrsNo: searchParams.get('mrsNo') || '',
         sourceReqNumber: searchParams.get('reqNumber') || null,
@@ -120,21 +122,27 @@ function PurchaseOrderContent() {
               <tbody>
                 {purchaseOrders.length > 0 ? (
                   <>
-                    {purchaseOrders.map((order, index) => (
+                    {purchaseOrders.map((order, index) => {
+                      const items = order.items || [];
+                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
+                      return (
                       <tr key={index} onClick={() => handleOpenReceipt(order)}
                         className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50`}>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{totalQty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{unitSummary}</td>
                         <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
                         <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                     <TableScrollSentinel colSpan={10} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
                   </>
                 ) : (

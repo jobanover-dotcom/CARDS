@@ -3,17 +3,20 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAdminData } from '../../context/AdminDataContext';
 
+function makeEmptyItem() {
+  return { itemDescription: '', qty: '', unit: 'pcs' };
+}
+
 function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const { user } = useAuth();
   const { createPO, warehouses } = useAdminData();
 
-  const [formListedBy, setFormListedBy] = useState(user?.username || '');
+  const [formListedBy, setFormListedBy] = useState(user?.name || user?.username || '');
   const [formPoNumber, setFormPoNumber] = useState('');
   const [formPoDate, setFormPoDate] = useState('');
-  const [formItemDescription, setFormItemDescription] = useState(initialData?.itemDescription || '');
-  const [formQty, setFormQty] = useState(initialData?.qty || '');
-  const [requestedQty, setRequestedQty] = useState(initialData?.requestedQty || '');
-  const [formUnit, setFormUnit] = useState(initialData?.unit || 'pcs');
+  const [items, setItems] = useState(
+    initialData?.items?.length ? initialData.items.map((it) => ({ ...it, qty: String(it.qty) })) : [makeEmptyItem()]
+  );
   const [formNotes, setFormNotes] = useState('');
   const [formApprovedBy, setFormApprovedBy] = useState(initialData?.approvedBy || '');
   const [formApprovalDate, setFormApprovalDate] = useState(initialData?.approvalDate || '');
@@ -30,21 +33,29 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
 
+  const updateItem = (idx, field, value) => setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: value } : it)));
+  const addItem = () => setItems((prev) => [...prev, makeEmptyItem()]);
+  const removeItem = (idx) => setItems((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev));
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSubmitError(null);
-    if (!formPoNumber || !formPoDate || !formItemDescription || !formQty || !formRequisitioner || !formMrsNo || !formPickupBy || !formPlateNumber || !formSupplierName || !formWarehouse) {
+    if (!formPoNumber || !formPoDate || !formRequisitioner || !formMrsNo || !formPickupBy || !formPlateNumber || !formSupplierName || !formWarehouse) {
       alert('Please fill in all required fields marked with *');
+      return;
+    }
+    if (items.length === 0 || items.some((it) => !it.itemDescription.trim() || !it.qty || (parseInt(it.qty) || 0) < 1)) {
+      alert('Please fill in a description and a positive quantity for every item');
       return;
     }
     if (submitting) return;
 
+    const poItems = items.map((it) => ({ itemDescription: it.itemDescription, qty: parseInt(it.qty) || 0, unit: it.unit }));
+
     const newPO = {
       date: formPoDate,
       poNumber: formPoNumber,
-      itemDescription: formItemDescription,
-      qty: parseInt(formQty) || 0,
-      unit: formUnit,
+      items: poItems,
       supplier: formSupplierName,
       supplierAddress: formSupplierAddress,
       requisitioner: formRequisitioner,
@@ -57,12 +68,16 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
       notes: formNotes,
       warehouse: formWarehouse,
       profileId: user?.id || null,
-      status: 'incomplete',
-      poType: 'active-delivery'
     };
 
     const source = initialData?.sourceReqNumber
-      ? { reqNumber: initialData.sourceReqNumber, approvedQty: parseInt(formQty) || 0 }
+      ? {
+          reqNumber: initialData.sourceReqNumber,
+          itemApprovals: (initialData.itemApprovals || []).map((a) => {
+            const row = items.find((it) => it.id === a.id);
+            return row ? { id: a.id, approvedQty: parseInt(row.qty) || 0 } : a;
+          }),
+        }
       : null;
 
     setSubmitting(true);
@@ -96,7 +111,7 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
           )}
           <div className="flex flex-col gap-1.5 text-left w-full">
             <label className={labelClass}>LISTED BY (PURCHASER) <span className="text-[#d32f2f] ml-0.5">*</span></label>
-            <input type="text" value={formListedBy} onChange={(e) => setFormListedBy(e.target.value)} placeholder="Enter purchaser username" required className={inputClass} />
+            <input type="text" value={formListedBy} onChange={(e) => setFormListedBy(e.target.value)} placeholder="Enter purchaser name" required className={inputClass} />
           </div>
 
           <div className="flex gap-4 w-full">
@@ -110,33 +125,38 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
             </div>
           </div>
 
-          <div className="text-[11px] font-bold text-[#888] tracking-widest mt-3 mb-1 border-b border-[#f0f0f0] pb-1 uppercase text-left">ITEM DETAILS</div>
-
-          <div className="flex gap-4 w-full">
-            <div className="flex flex-col gap-1.5 text-left flex-[2]">
-              <label className={labelClass}>ITEM DESCRIPTION <span className="text-[#d32f2f] ml-0.5">*</span></label>
-              <input type="text" value={formItemDescription} onChange={(e) => setFormItemDescription(e.target.value)} placeholder="Enter description" required className={inputClass} />
-            </div>
-            <div className="flex flex-col gap-1.5 text-left flex-[0.8]">
-              <label className={labelClass}>
-                QTY <span className="text-[#d32f2f] ml-0.5">*</span>
-                {requestedQty && parseInt(formQty) !== parseInt(requestedQty) && (
-                  <span className="font-normal text-[#f57c00]"> (requested: {requestedQty})</span>
-                )}
-              </label>
-              <input type="number" value={formQty} onChange={(e) => setFormQty(e.target.value)} placeholder="0" required className={inputClass} />
-            </div>
-            <div className="flex flex-col gap-1.5 text-left flex-[1]">
-              <label className={labelClass}>UNIT <span className="text-[#d32f2f] ml-0.5">*</span></label>
-              <select value={formUnit} onChange={(e) => setFormUnit(e.target.value)} required className={inputClass}>
-                <option value="pcs">pcs</option>
-                <option value="bags">bags</option>
-                <option value="rolls">rolls</option>
-                <option value="sets">sets</option>
-                <option value="boxes">boxes</option>
-              </select>
-            </div>
+          <div className="text-[11px] font-bold text-[#888] tracking-widest mt-3 mb-1 border-b border-[#f0f0f0] pb-1 uppercase text-left flex items-center justify-between">
+            <span>ITEM DETAILS</span>
+            <button type="button" onClick={addItem} className="normal-case tracking-normal text-[#0288d1] hover:text-[#01579b] font-semibold cursor-pointer bg-none border-none text-[11px]">+ Add item</button>
           </div>
+
+          {items.map((it, idx) => (
+            <div key={idx} className="flex gap-3 w-full items-start border border-[#f0f0f0] rounded-md p-3">
+              <div className="flex flex-col gap-1.5 text-left flex-[2]">
+                {idx === 0 && <label className={labelClass}>ITEM DESCRIPTION <span className="text-[#d32f2f] ml-0.5">*</span></label>}
+                <input type="text" value={it.itemDescription} onChange={(e) => updateItem(idx, 'itemDescription', e.target.value)} placeholder="Enter description" required className={inputClass} />
+              </div>
+              <div className="flex flex-col gap-1.5 text-left flex-[0.8]">
+                {idx === 0 && <label className={labelClass}>QTY <span className="text-[#d32f2f] ml-0.5">*</span></label>}
+                <input type="number" value={it.qty} onChange={(e) => updateItem(idx, 'qty', e.target.value)} placeholder="0" required className={inputClass} />
+              </div>
+              <div className="flex flex-col gap-1.5 text-left flex-[1]">
+                {idx === 0 && <label className={labelClass}>UNIT <span className="text-[#d32f2f] ml-0.5">*</span></label>}
+                <select value={it.unit} onChange={(e) => updateItem(idx, 'unit', e.target.value)} required className={inputClass}>
+                  <option value="pcs">pcs</option>
+                  <option value="bags">bags</option>
+                  <option value="rolls">rolls</option>
+                  <option value="sets">sets</option>
+                  <option value="boxes">boxes</option>
+                </select>
+              </div>
+              {items.length > 1 && (
+                <button type="button" onClick={() => removeItem(idx)} className={`text-[#d32f2f] text-lg leading-none px-1 cursor-pointer bg-none border-none ${idx === 0 ? 'mt-6' : 'mt-2'}`} title="Remove item">
+                  &times;
+                </button>
+              )}
+            </div>
+          ))}
 
           <div className="flex flex-col gap-1.5 text-left w-full">
             <label className={labelClass}>ITEM NOTES (optional)</label>

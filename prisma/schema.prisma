@@ -19,27 +19,24 @@ model Profile {
 }
 
 model PurchaseOrder {
-  id               String   @id @default(uuid())
-  date             String
-  poNumber         String   @unique
-  itemDescription  String
-  qty              Int
-  unit             String
-  supplier         String
-  supplierAddress  String?
-  requisitioner    String
-  mrsNo            String
-  poExpDate        String?
-  poRvdDate        String?
-  pickupBy         String
-  plateNumber      String?
-  approvedBy       String?
-  listedBy         String?
-  notes            String?
-  status           String   @default("incomplete")
-  poType           String   @default("active-delivery")
-  statusLabel      String   @default("Open")
-  warehouse        String
+  id              String  @id @default(uuid())
+  date            String
+  poNumber        String  @unique
+  supplier        String
+  supplierAddress String?
+  requisitioner   String
+  mrsNo           String
+  poExpDate       String?
+  poRvdDate       String?
+  pickupBy        String
+  plateNumber     String?
+  approvedBy      String?
+  listedBy        String?
+  notes           String?
+  status          String  @default("incomplete")
+  poType          String  @default("active-delivery")
+  statusLabel     String  @default("Open")
+  warehouse       String
 
   monQtyRvd        String?
   monDeliveredBy   String?
@@ -51,27 +48,54 @@ model PurchaseOrder {
   profileId String?
   profile   Profile? @relation(fields: [profileId], references: [id])
 
+  items PurchaseOrderItem[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-model WarehouseRequest {
-  id              String   @id @default(uuid())
-  date            String
-  reqNumber       String   @unique
+model PurchaseOrderItem {
+  id              String        @id @default(uuid())
+  poNumber        String
+  po              PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
   itemDescription String
   qty             Int
   unit            String
-  mrsNo           String
-  requestedBy     String
-  requisitioner   String
-  warehouse       String?
-  status          String   @default("Pending")
-  remarks         String?
+  createdAt       DateTime      @default(now())
+
+  @@index([poNumber])
+}
+
+model WarehouseRequest {
+  id                  String  @id @default(uuid())
+  date                String
+  reqNumber           String  @unique
+  mrsNo               String
+  requestedBy         String
+  requisitioner       String
+  warehouse           String?
+  status              String  @default("Pending")
+  remarks             String?
+  followUpOfReqNumber String?    // follow-up of a previous REQUEST (partial approval)
+  followUpOfPoNumber  String?    // follow-up of a PARTIALLY RECEIVED PO
+
+  items WarehouseRequestItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model WarehouseRequestItem {
+  id              String           @id @default(uuid())
+  reqNumber       String
+  request         WarehouseRequest @relation(fields: [reqNumber], references: [reqNumber], onDelete: Cascade)
+  itemDescription String
+  qty             Int
+  unit            String
   approvedQty     Int?
-  followUpOfReqNumber String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime         @default(now())
+
+  @@index([reqNumber])
 }
 
 model Warehouse {

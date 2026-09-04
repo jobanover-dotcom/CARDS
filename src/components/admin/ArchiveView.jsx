@@ -83,23 +83,29 @@ function ArchiveView() {
       const snap = await recordArchiveDownload(selectedEntry.id);
       const wb = new ExcelJS.Workbook();
 
-      const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'Pick-up by', 'Status'];
+      const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Supplier Name', 'Requisitioner', 'MRS No.', 'Pick-up by', 'Status'];
       const poRows = (snap.poData || []).map(o => [
-        o.date, o.poNumber, o.itemDescription, o.qty, o.unit,
+        o.date, o.poNumber,
+        (o.items || []).map(i => i.itemDescription).join('; '),
+        (o.items || []).map(i => `${i.qty} ${i.unit}`).join('; '),
         o.supplier, o.requisitioner, o.mrsNo, o.pickupBy, o.statusLabel || o.status,
       ]);
       const wsPO = wb.addWorksheet('Purchase Orders');
-      wsPO.columns = [{ width: 12 }, { width: 16 }, { width: 28 }, { width: 8 }, { width: 8 }, { width: 20 }, { width: 20 }, { width: 14 }, { width: 18 }, { width: 14 }];
+      wsPO.columns = [{ width: 12 }, { width: 16 }, { width: 28 }, { width: 14 }, { width: 20 }, { width: 20 }, { width: 14 }, { width: 18 }, { width: 14 }];
       wsPO.addRow(poHeaders);
       poRows.forEach(r => wsPO.addRow(r));
 
-      const reqHeaders = ['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'];
+      const reqHeaders = ['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'];
       const reqRows = (snap.requestData || []).map(r => [
-        r.date, r.reqNumber, r.mrsNo, r.itemDescription, r.qty, r.unit,
-        r.requestedBy, r.requisitioner, r.approvedQty ?? '', r.status,
+        r.date, r.reqNumber, r.mrsNo,
+        (r.items || []).map(i => i.itemDescription).join('; '),
+        (r.items || []).map(i => `${i.qty} ${i.unit}`).join('; '),
+        r.requestedBy, r.requisitioner,
+        (r.items || []).some(i => i.approvedQty != null) ? (r.items || []).reduce((s, i) => s + (i.approvedQty ?? 0), 0) : '',
+        r.status,
       ]);
       const wsReq = wb.addWorksheet('Requests');
-      wsReq.columns = [{ width: 12 }, { width: 14 }, { width: 14 }, { width: 28 }, { width: 8 }, { width: 8 }, { width: 18 }, { width: 20 }, { width: 12 }, { width: 18 }];
+      wsReq.columns = [{ width: 12 }, { width: 14 }, { width: 14 }, { width: 28 }, { width: 14 }, { width: 18 }, { width: 20 }, { width: 12 }, { width: 18 }];
       wsReq.addRow(reqHeaders);
       reqRows.forEach(r => wsReq.addRow(r));
 

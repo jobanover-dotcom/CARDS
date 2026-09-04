@@ -70,15 +70,49 @@ export async function restoreArchive(id: string) {
   const entry = await prisma.warehouseArchive.findUnique({ where: { id } });
   if (!entry) throw new Error('Archive entry not found');
 
-  const pos = entry.poData as unknown as PO[];
-  const reqs = entry.requestData as unknown as Req[];
+  const pos = entry.poData as unknown as (PO & { items?: any[] })[];
+  const reqs = entry.requestData as unknown as (Req & { items?: any[] })[];
 
   const uniquePos = Array.from(new Map(pos.map(p => [p.poNumber, p])).values());
   const uniqueReqs = Array.from(new Map(reqs.map(r => [r.reqNumber, r])).values());
 
   const result = await prisma.$transaction(async (tx) => {
-    const poResult = await tx.purchaseOrder.createMany({ data: uniquePos, skipDuplicates: true });
-    const reqResult = await tx.warehouseRequest.createMany({ data: uniqueReqs, skipDuplicates: true });
+    const existingPoNumbers = new Set(
+      (await tx.purchaseOrder.findMany({ where: { poNumber: { in: uniquePos.map(p => p.poNumber) } }, select: { poNumber: true } })).map(p => p.poNumber)
+    );
+    const existingReqNumbers = new Set(
+      (await tx.warehouseRequest.findMany({ where: { reqNumber: { in: uniqueReqs.map(r => r.reqNumber) } }, select: { reqNumber: true } })).map(r => r.reqNumber)
+    );
+
+    let restoredPOs = 0;
+    for (const p of uniquePos) {
+      if (existingPoNumbers.has(p.poNumber)) continue;
+      const { id: _id, items, createdAt, updatedAt, ...rest } = p as any;
+      await tx.purchaseOrder.create({
+        data: {
+          ...rest,
+          items: {
+            create: (items || []).map(({ id: _iid, poNumber: _pn, createdAt: _ic, ...itemRest }: any) => itemRest),
+          },
+        },
+      });
+      restoredPOs++;
+    }
+
+    let restoredReqs = 0;
+    for (const r of uniqueReqs) {
+      if (existingReqNumbers.has(r.reqNumber)) continue;
+      const { id: _id, items, createdAt, updatedAt, ...rest } = r as any;
+      await tx.warehouseRequest.create({
+        data: {
+          ...rest,
+          items: {
+            create: (items || []).map(({ id: _iid, reqNumber: _rn, createdAt: _ic, ...itemRest }: any) => itemRest),
+          },
+        },
+      });
+      restoredReqs++;
+    }
 
     if (entry.reason === 'deleted') {
       await tx.warehouse.upsert({
@@ -92,7 +126,7 @@ export async function restoreArchive(id: string) {
       data: {
         warehouseName: entry.warehouseName,
         action: 'restored',
-        detail: `Restored ${poResult.count} purchase order(s) and ${reqResult.count} request(s); skipped ${uniquePos.length - poResult.count} duplicate PO(s) and ${uniqueReqs.length - reqResult.count} duplicate request(s)`,
+        detail: `Restored ${restoredPOs} purchase order(s) and ${restoredReqs} request(s); skipped ${uniquePos.length - restoredPOs} duplicate PO(s) and ${uniqueReqs.length - restoredReqs} duplicate request(s)`,
         actor: user.username,
       },
     });
@@ -100,10 +134,10 @@ export async function restoreArchive(id: string) {
     await tx.warehouseArchive.delete({ where: { id: entry.id } });
 
     return {
-      restoredPOs: poResult.count,
-      skippedPOs: uniquePos.length - poResult.count,
-      restoredReqs: reqResult.count,
-      skippedReqs: uniqueReqs.length - reqResult.count,
+      restoredPOs,
+      skippedPOs: uniquePos.length - restoredPOs,
+      restoredReqs,
+      skippedReqs: uniqueReqs.length - restoredReqs,
     };
   });
 
@@ -124,8 +158,8 @@ export async function deleteWarehouseWithArchive(name: string) {
   }
 
   const { archivedPOs, archivedRequests, deletedUsers } = await prisma.$transaction(async (tx) => {
-    const pos = await tx.purchaseOrder.findMany({ where: { warehouse: name } });
-    const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: name } });
+    const pos = await tx.purchaseOrder.findMany({ where: { warehouse: name }, include: { items: true } });
+    const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: name }, include: { items: true } });
 
     await tx.warehouseArchive.create({
       data: {
@@ -196,8 +230,8 @@ export async function systemReset() {
 
   for (const wh of warehouses) {
     const result = await prisma.$transaction(async (tx) => {
-      const pos = await tx.purchaseOrder.findMany({ where: { warehouse: wh.name } });
-      const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: wh.name } });
+      const pos = await tx.purchaseOrder.findMany({ where: { warehouse: wh.name }, include: { items: true } });
+      const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: wh.name }, include: { items: true } });
       if (pos.length === 0 && reqs.length === 0) return null;
 
       await tx.warehouseArchive.create({
@@ -233,8 +267,8 @@ export async function systemReset() {
   }
 
   const [orphanPos, orphanReqs] = await prisma.$transaction([
-    prisma.purchaseOrder.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] } }),
-    prisma.warehouseRequest.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] } }),
+    prisma.purchaseOrder.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] }, include: { items: true } }),
+    prisma.warehouseRequest.findMany({ where: { OR: [{ warehouse: { notIn: whNames } }, { warehouse: null }] }, include: { items: true } }),
   ]);
 
   if (orphanPos.length > 0 || orphanReqs.length > 0) {
@@ -246,7 +280,7 @@ export async function systemReset() {
           poCount: orphanPos.length,
           requestCount: orphanReqs.length,
           poData: JSON.parse(JSON.stringify(orphanPos)),
-          requestData: JSON.parse(JSON.stringify(reqs)),
+          requestData: JSON.parse(JSON.stringify(orphanReqs)),
         },
       });
       const orphanIds = orphanPos.map(p => p.id);

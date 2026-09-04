@@ -109,7 +109,7 @@ function RequestsView() {
           <table className="w-full min-w-[900px] border-collapse text-[13px]">
             <thead>
               <tr>
-                {['R date', 'MRS #', 'Item Description', 'Qty', 'Unit', 'Approved by', 'Requisitioner', 'Approved / Balance', 'Status'].map((h, i) => (
+                {['R date', 'MRS #', 'Items', 'Qty', 'Approved by', 'Requisitioner', 'Approved / Balance', 'Status'].map((h, i) => (
                   <th key={i} className="bg-gradient-to-r from-[#fff8e1] to-[#ffe0b2] p-4 text-left font-bold text-[#f57f17] border-b-2 border-[#f57f17]/30 sticky top-0 z-10">{h}</th>
                 ))}
               </tr>
@@ -118,7 +118,12 @@ function RequestsView() {
               {filteredRequests.length > 0 ? (
                 <>
                   {filteredRequests.map((req, index) => {
-                    const balance = req.approvedQty != null ? Math.max(0, req.qty - req.approvedQty) : null;
+                    const items = req.items || [];
+                    const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                    const hasApprovals = items.some((it) => it.approvedQty != null);
+                    const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
+                    const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+                    const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
                     return (
                       <tr key={index}
                         className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${
@@ -130,22 +135,33 @@ function RequestsView() {
                         }}>
                         <td className="p-4 text-[#333] font-medium">{req.date}</td>
                         <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.qty}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">
+                          {itemSummary}
+                          {req.followUpOfReqNumber && (
+                            <span className="ml-2 px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#5e35b1] text-[10px] font-bold align-middle" title={`Follow-up of request ${req.followUpOfReqNumber}`}>
+                              Follow-up (Req)
+                            </span>
+                          )}
+                          {req.followUpOfPoNumber && (
+                            <span className="ml-2 px-2 py-0.5 rounded-full bg-[#fef5f5] text-[#c62828] text-[10px] font-bold align-middle border border-[#ffcdd2]" title={`Follow-up of PO ${req.followUpOfPoNumber} (short delivery)`}>
+                              Follow-up (PO)
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-4 text-[#333] font-medium">{totalQty}</td>
                         <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
                         <td className="p-4 text-[#333] font-medium">{req.requisitioner}</td>
                         <td className={`p-4 font-medium whitespace-nowrap ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
-                          {balance == null ? '—' : `${req.approvedQty} / ${req.qty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                          {totalApproved == null ? '—' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
                         </td>
                         <td className="p-4"><StatusBadge status={req.status} /></td>
                       </tr>
                     );
                   })}
-                  <TableScrollSentinel colSpan={9} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  <TableScrollSentinel colSpan={8} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
                 </>
               ) : (
-                <EmptyState colSpan={9} message="No requests found" />
+                <EmptyState colSpan={8} message="No requests found" />
               )}
             </tbody>
           </table>

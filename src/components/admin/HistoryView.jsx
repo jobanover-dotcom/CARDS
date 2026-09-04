@@ -178,14 +178,19 @@ function HistoryView() {
               <tbody>
                 {poList.rows.length > 0 ? (
                   <>
-                    {poList.rows.map((order, index) => (
+                    {poList.rows.map((order, index) => {
+                      const items = order.items || [];
+                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
+                      return (
                       <tr key={index} onClick={() => handleOpenReceipt(order)}
                         className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-[#e8f5e9]' : 'bg-[#c8e6c9]'} hover:bg-[#f0f8fc]/50`}>
                         <td className="p-4 text-[#333] font-medium">{order.date}</td>
                         <td className="p-4 text-[#333] font-medium">{order.poNumber}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.qty}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.unit}</td>
+                        <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                        <td className="p-4 text-[#333] font-medium">{totalQty}</td>
+                        <td className="p-4 text-[#333] font-medium">{unitSummary}</td>
                         <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
                         <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
                         <td className="p-4 text-[#333] font-medium">{order.mrsNo || '-'}</td>
@@ -195,7 +200,8 @@ function HistoryView() {
                           <StatusBadge status={order.status === 'completed' ? 'Completed' : 'Open'} />
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                     <TableScrollSentinel colSpan={11} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
                   </>
                 ) : (
@@ -218,21 +224,27 @@ function HistoryView() {
                 {reqList.rows.length > 0 ? (
                   <>
                     {reqList.rows.map((req, index) => {
-                      const balance = req.approvedQty != null ? Math.max(0, req.qty - req.approvedQty) : null;
+                      const items = req.items || [];
+                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                      const hasApprovals = items.some((it) => it.approvedQty != null);
+                      const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
+                      const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
                       return (
                         <tr key={index}
                           className={`border-b border-gray-200 transition-colors duration-150 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50 ${req.status === 'Rejected' ? 'cursor-pointer' : ''}`}
                           onClick={() => { if (req.status === 'Rejected') handleViewRejectedRemarks(req); }}>
                           <td className="p-4 text-[#333] font-medium">{req.date}</td>
                           <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.qty}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.unit}</td>
+                          <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                          <td className="p-4 text-[#333] font-medium">{totalQty}</td>
+                          <td className="p-4 text-[#333] font-medium">{unitSummary}</td>
                           <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
                           <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
                           <td className="p-4 text-[#333] font-medium">{req.requisitioner}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
-                            {balance == null ? '—' : `${req.approvedQty} / ${req.qty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                            {totalApproved == null ? '—' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
                           </td>
                           <td className="p-4"><StatusBadge status={req.status} /></td>
                         </tr>

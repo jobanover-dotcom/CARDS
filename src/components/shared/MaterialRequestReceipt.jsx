@@ -219,20 +219,25 @@ function MaterialRequestReceipt({ po, onClose, onDelete }) {
               <span># DESCRIPTION</span>
               <span>QTY</span>
             </div>
-            <div className="flex justify-between items-start pt-1">
-              <div className="text-left">
-                <div className="font-bold text-[#333]">1 {po.itemDescription}</div>
-                <div className="text-[10px] text-gray-400 font-medium">Construction Materials</div>
-                {po.notes && (
-                  <div className="text-[10px] text-gray-400 italic">Note: {po.notes}</div>
-                )}
-              </div>
-              <div className="text-right">
-                <span className="font-bold text-[#333] block">{po.qty} {po.unit}</span>
-                <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold mt-1.5 uppercase ${statusColor.bg} ${statusColor.text}`}>
-                  {statusDisplay}
-                </span>
-              </div>
+            <div className="flex flex-col gap-2.5 pt-1">
+              {(po.items || []).map((item, idx) => (
+                <div key={item.id || idx} className="flex justify-between items-start">
+                  <div className="text-left">
+                    <div className="font-bold text-[#333]">{idx + 1}. {item.itemDescription}</div>
+                  </div>
+                  <div className="text-right">
+                    <span className="font-bold text-[#333] block">{item.qty} {item.unit}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {po.notes && (
+              <div className="text-[10px] text-gray-400 italic text-left">Note: {po.notes}</div>
+            )}
+            <div className="flex justify-end pt-1">
+              <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold uppercase ${statusColor.bg} ${statusColor.text}`}>
+                {statusDisplay}
+              </span>
             </div>
           </div>
         </div>
@@ -266,15 +271,15 @@ function MaterialRequestReceipt({ po, onClose, onDelete }) {
               </div>
               <div className="col-span-2 flex flex-col gap-0.5">
                 <span className="text-[#888] font-bold text-[9px] uppercase">Item Description:</span>
-                <span className="text-[#333] font-semibold">{po.itemDescription}</span>
+                <span className="text-[#333] font-semibold">{(po.items || []).map((i) => `${i.itemDescription} (${i.qty} ${i.unit})`).join(', ')}</span>
               </div>
               <div className="flex flex-col gap-0.5">
                 <span className="text-[#888] font-bold text-[9px] uppercase">Qty. rvd:</span>
-                <span className="text-[#333] font-semibold">{po.qty}</span>
+                <span className="text-[#333] font-semibold">{po.monQtyRvd || '—'}</span>
               </div>
               <div className="flex flex-col gap-0.5">
                 <span className="text-[#888] font-bold text-[9px] uppercase">Unit:</span>
-                <span className="text-[#333] font-semibold">{po.unit}</span>
+                <span className="text-[#333] font-semibold">{po.items?.length === 1 ? po.items[0].unit : 'various'}</span>
               </div>
               <div className="flex flex-col gap-0.5">
                 <span className="text-[#888] font-bold text-[9px] uppercase">Delivered By:</span>

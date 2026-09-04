@@ -159,17 +159,21 @@ function DashboardView() {
                 {purchaseOrders.length > 0 ? (
                   <>
                     {purchaseOrders.map((order, index) => {
+                      const items = order.items || [];
+                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
                       const isCompletedOrActive = order.status === 'completed' || order.poType === 'active-delivery';
                       const hasMonitoring = order.monQtyRvd && order.monQtyRvd !== '';
-                      const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== order.qty;
+                      const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== totalQty;
                       const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
                       return (
                         <tr key={index} onClick={() => handleOpenReceipt(order)} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${rowBg} hover:bg-[#f0f8fc]/50`}>
                           <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
                           <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                          <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
+                          <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{totalQty}</td>
+                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{unitSummary}</td>
                           <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
                           <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
                           <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
@@ -177,9 +181,9 @@ function DashboardView() {
                           <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.poNumber}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.date}</td>
-                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.itemDescription}</td>
+                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{itemSummary}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold bg-red-50' : 'text-[#333]'}`}>{order.monQtyRvd || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.unit}</td>
+                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{unitSummary}</td>
                           <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDeliveredBy || '-'}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDateDelivered || '-'}</td>
                           <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monReferenceNo || '-'}</td>

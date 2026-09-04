@@ -1,6 +1,7 @@
 'use client';
 import React, { useState } from 'react';
 import { useWarehouseData } from '../../context/WarehouseDataContext';
+import CreateRequestModal from './CreateRequestModal';
 
 function MonitoringDetailsForm({ po, onClose }) {
   const { updatePO } = useWarehouseData();
@@ -16,9 +17,9 @@ function MonitoringDetailsForm({ po, onClose }) {
     day = day.padStart(2, '0');
     return `${year}-${month}-${day}`;
   });
-  const [monDescription] = useState(po.itemDescription || '');
+  const [monDescription] = useState((po.items || []).map((i) => i.itemDescription).join(', '));
   const [monQtyRvd, setMonQtyRvd] = useState('');
-  const [monUnit] = useState(po.unit || '');
+  const [monUnit] = useState(po.items?.length === 1 ? po.items[0].unit : (po.items?.length ? 'various' : ''));
   const [monDeliveredBy, setMonDeliveredBy] = useState('');
   const [monDateDelivered, setMonDateDelivered] = useState('');
   const [monReferenceNo, setMonReferenceNo] = useState('');
@@ -29,6 +30,13 @@ function MonitoringDetailsForm({ po, onClose }) {
   const [showMonSuccess, setShowMonSuccess] = useState(false);
   const [saveError, setSaveError] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [showFollowUpModal, setShowFollowUpModal] = useState(false);
+  const [followUpPo, setFollowUpPo] = useState(null);
+
+  const totalOrdered = (po.items || []).reduce((s, it) => s + it.qty, 0);
+  const qtyReceivedValue = parseInt(monQtyRvd) || 0;
+  const shortfall = Math.max(0, totalOrdered - qtyReceivedValue);
+  const hasShortfall = shortfall > 0 && monQtyRvd;
 
   const isDiscrepancyRequired = markAsDiscrepancy && !monRemarks.trim();
 
@@ -41,7 +49,7 @@ function MonitoringDetailsForm({ po, onClose }) {
     if (saving) return;
 
     const qtyReceived = parseInt(monQtyRvd) || 0;
-    const originalQty = parseInt(po.qty) || 0;
+    const originalQty = (po.items || []).reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
     if (qtyReceived < 1) {
       setSaveError('Qty received must be a positive number.');
       return;
@@ -53,8 +61,8 @@ function MonitoringDetailsForm({ po, onClose }) {
 
     const hasDiscrepancy = markAsDiscrepancy || qtyReceived !== originalQty;
     const finalStatus = hasDiscrepancy ? 'incomplete' : 'completed';
-    const finalPoType = hasDiscrepancy ? 'discrepancy' : 'completed';
-    const finalStatusLabel = hasDiscrepancy ? 'Discrepancy' : 'Completed';
+    const finalPoType = hasDiscrepancy && !markAsDiscrepancy ? 'partially-received' : (hasDiscrepancy ? 'discrepancy' : 'completed');
+    const finalStatusLabel = hasDiscrepancy && !markAsDiscrepancy ? `Partially Received (${qtyReceived}/${totalOrdered})` : (hasDiscrepancy ? 'Discrepancy' : 'Completed');
 
     setSaving(true);
     setSaveError(null);
@@ -63,7 +71,6 @@ function MonitoringDetailsForm({ po, onClose }) {
         status: finalStatus,
         poType: finalPoType,
         statusLabel: finalStatusLabel,
-        qty: qtyReceived,
         pickupBy: monPickupBy,
         poExpDate: monDateDelivered,
         supplierAddress: po.supplierAddress || 'Davao City',
@@ -76,10 +83,19 @@ function MonitoringDetailsForm({ po, onClose }) {
         monRemarks,
       });
       setShowMonSuccess(true);
-      setTimeout(() => {
-        setShowMonSuccess(false);
-        onClose();
-      }, 2000);
+
+      // If there's a shortfall, show the follow-up modal after success
+      if (hasShortfall) {
+        setTimeout(() => {
+          setFollowUpPo({ ...po, monQtyRvd });
+          setShowFollowUpModal(true);
+        }, 1500);
+      } else {
+        setTimeout(() => {
+          setShowMonSuccess(false);
+          onClose();
+        }, 2000);
+      }
     } catch (err) {
       setSaveError(err?.message || 'Failed to save monitoring details. Please try again.');
     } finally {
@@ -87,7 +103,10 @@ function MonitoringDetailsForm({ po, onClose }) {
     }
   };
 
+  const inputClass = "py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border";
+
   return (
+    <>
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in overflow-y-auto py-6 px-4">
       <div className="bg-white rounded-xl w-full max-w-[500px] shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6 relative font-sans text-left">
         <button
@@ -102,6 +121,12 @@ function MonitoringDetailsForm({ po, onClose }) {
         {showMonSuccess && (
           <div className="mb-4 p-3 bg-[#e8f5e9] text-[#2e7d32] border border-[#a5d6a7] rounded-md text-xs font-bold flex items-center justify-center gap-1.5 animate-pulse">
             <span>&#10003; Saved successfully!</span>
+          </div>
+        )}
+
+        {hasShortfall && !showMonSuccess && (
+          <div className="mb-4 p-3 bg-[#fff3e0] text-[#e65100] border border-[#ffb74d] rounded-md text-xs font-bold">
+            ⚠️ Shortfall detected: {shortfall} item(s) not received. You&apos;ll be able to file a follow-up after saving.
           </div>
         )}
 
@@ -124,7 +149,7 @@ function MonitoringDetailsForm({ po, onClose }) {
             </div>
             <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
               <label>Qty. rvd.:</label>
-              <input type="number" value={monQtyRvd} onChange={(e) => setMonQtyRvd(e.target.value)} placeholder="0" required className="py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border" />
+              <input type="number" value={monQtyRvd} onChange={(e) => setMonQtyRvd(e.target.value)} placeholder="0" required className={`py-2 px-3 border rounded-md text-[13px] text-[#333] focus:outline-none focus:border-[#006680] w-full box-border ${hasShortfall ? 'border-[#ff9800] bg-[#fff8e1]' : 'border-[#ccc]'}`} />
             </div>
             <div className="flex flex-col gap-1.5 flex-1 text-[11px] font-bold text-[#444]">
               <label>Unit:</label>
@@ -205,6 +230,18 @@ function MonitoringDetailsForm({ po, onClose }) {
         </form>
       </div>
     </div>
+
+    {showFollowUpModal && followUpPo && (
+      <CreateRequestModal
+        followUpPo={followUpPo}
+        onClose={() => {
+          setShowFollowUpModal(false);
+          setShowMonSuccess(false);
+          onClose();
+        }}
+      />
+    )}
+    </>
   );
 }
 

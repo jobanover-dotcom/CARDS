@@ -12,6 +12,30 @@ import { getUsers } from '../../../actions/users';
 import { deleteUser as deleteUserServer, updateUserWarehouse } from '../../../actions/users';
 import { getWarehouses } from '../../../actions/warehouses';
 
+function poSummary(order) {
+  const items = order.items || [];
+  return {
+    itemSummary: items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—',
+    totalQty: items.reduce((s, it) => s + it.qty, 0),
+    unitSummary: items.length === 1 ? items[0].unit : (items.length ? 'various' : '—'),
+  };
+}
+
+function reqSummary(req) {
+  const items = req.items || [];
+  const totalQty = items.reduce((s, it) => s + it.qty, 0);
+  const hasApprovals = items.some((it) => it.approvedQty != null);
+  const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
+  const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+  return {
+    itemSummary: items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—',
+    totalQty,
+    totalApproved,
+    balance,
+    unitSummary: items.length === 1 ? items[0].unit : (items.length ? 'various' : '—'),
+  };
+}
+
 function AdminDashboard() {
   const { user, logout } = useAuth();
   const { warehouses, poVersion, requestVersion, userVersion, refreshStats, refreshRequestCounts, createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse, approveRequest: handleApproveRequest, declineRequest: handleDeclineRequest, addWarehouse: handleAddWarehouse, deleteWarehouse } = useAdminData();
@@ -107,7 +131,7 @@ function AdminDashboard() {
 
   let filteredHistoryPOs = useMemo(() => {
     return purchaseOrders.filter(order => {
-      if (historySearchQuery && !order.poNumber.includes(historySearchQuery) && !order.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase())) return false;
+      if (historySearchQuery && !order.poNumber.includes(historySearchQuery) && !(order.items || []).some((i) => i.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase()))) return false;
       const activeFiltersCount = Object.keys(appliedFilters).filter(key => !['approved','pending','rejected'].includes(key) && appliedFilters[key]).length;
       if (activeFiltersCount > 0) {
         let match = false;
@@ -123,7 +147,7 @@ function AdminDashboard() {
 
   let filteredHistoryReqs = useMemo(() => {
     return requestsList.filter(req => {
-      if (historySearchQuery && !req.mrsNo.includes(historySearchQuery) && !req.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase())) return false;
+      if (historySearchQuery && !req.mrsNo.includes(historySearchQuery) && !(req.items || []).some((i) => i.itemDescription.toLowerCase().includes(historySearchQuery.toLowerCase()))) return false;
       const activeFiltersCount = Object.keys(appliedFilters).filter(key => ['approved','pending','rejected'].includes(key) && appliedFilters[key]).length;
       if (activeFiltersCount > 0) {
         let match = false;
@@ -138,7 +162,7 @@ function AdminDashboard() {
 
   let filteredRequests = useMemo(() => {
     return requestsList.filter(req => {
-      if (requestsSearchQuery && !req.mrsNo.includes(requestsSearchQuery) && !req.itemDescription.toLowerCase().includes(requestsSearchQuery.toLowerCase())) return false;
+      if (requestsSearchQuery && !req.mrsNo.includes(requestsSearchQuery) && !(req.items || []).some((i) => i.itemDescription.toLowerCase().includes(requestsSearchQuery.toLowerCase()))) return false;
       if (selectedRequestStatus && req.status !== selectedRequestStatus) return false;
       return true;
     });
@@ -152,8 +176,9 @@ function AdminDashboard() {
     }
     try {
       await createPOServer({
-        date: formPoDate, poNumber: formPoNumber, itemDescription: formItemDescription,
-        qty: parseInt(formQty) || 0, unit: formUnit, supplier: formSupplierName,
+        date: formPoDate, poNumber: formPoNumber,
+        items: [{ itemDescription: formItemDescription, qty: parseInt(formQty) || 0, unit: formUnit }],
+        supplier: formSupplierName,
         supplierAddress: formSupplierAddress, requisitioner: formRequisitioner,
         mrsNo: formMrsNo, poExpDate: formApprovalDate || formPoDate,
         pickupBy: formPickupBy, plateNumber: formPlateNumber, approvedBy: formApprovedBy,
@@ -220,9 +245,10 @@ function AdminDashboard() {
   };
 
   const handleProceedPO = async () => {
-    setFormItemDescription(selectedRequest.itemDescription);
-    setFormQty(selectedRequest.qty.toString());
-    setFormUnit(selectedRequest.unit);
+    const firstItem = (selectedRequest.items || [])[0] || {};
+    setFormItemDescription(firstItem.itemDescription || '');
+    setFormQty(String(firstItem.qty ?? ''));
+    setFormUnit(firstItem.unit || 'pcs');
     setFormRequisitioner(selectedRequest.requisitioner);
     setFormMrsNo(selectedRequest.mrsNo);
     setFormApprovedBy(selectedRequest.requestedBy || '');
@@ -346,7 +372,7 @@ function AdminDashboard() {
               <tbody>
                 {filteredDashboardOrders.length > 0 ? filteredDashboardOrders.map((order, index) => {
                   const isCompletedOrActive = order.status === 'completed' || order.poType === 'active-delivery';
-                  return (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50')} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{order.itemDescription}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td></tr>);
+                  return (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50')} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{poSummary(order).itemSummary}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{poSummary(order).totalQty}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{poSummary(order).unitSummary}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td></tr>);
                 }) : (<tr><td colSpan="10" className="p-8 text-center text-[#999]">No purchase orders found</td></tr>)}
               </tbody>
             </table>
@@ -377,7 +403,7 @@ function AdminDashboard() {
                 <tr>{['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by'].map((h, i) => (<th key={i} className="p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">{h}</th>))}</tr>
               </thead>
               <tbody>
-                {filteredPurchaseOrders.length > 0 ? filteredPurchaseOrders.map((order, index) => (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50`}><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{order.itemDescription}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td></tr>)) : (<tr><td colSpan="10" className="p-8 text-center text-[#999]">No purchase orders found</td></tr>)}
+                {filteredPurchaseOrders.length > 0 ? filteredPurchaseOrders.map((order, index) => (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f4fbf7]/50`}><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{poSummary(order).itemSummary}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{poSummary(order).totalQty}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{poSummary(order).unitSummary}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td></tr>)) : (<tr><td colSpan="10" className="p-8 text-center text-[#999]">No purchase orders found</td></tr>)}
               </tbody>
             </table>
           </div>
@@ -404,9 +430,9 @@ function AdminDashboard() {
           </div>
         </div>
         {historyTab === 'purchase-orders' ? (
-          <div className="overflow-x-auto max-h-[500px] border-t border-gray-100"><table className="w-full border-collapse text-[13px]"><thead className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] sticky top-0 z-20"><tr>{['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO rvd date', 'Pick-up by', 'Status'].map((h, i) => (<th key={i} className="p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{purchaseOrders.length > 0 ? purchaseOrders.map((order, index) => { const isCompleted = order.status === 'completed'; return (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-[#e8f5e9]' : 'bg-[#e3f2fd]'} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium">{order.date}</td><td className="p-4 text-[#333] font-medium">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{order.itemDescription}</td><td className="p-4 text-[#333] font-medium">{order.qty}</td><td className="p-4 text-[#333] font-medium">{order.unit}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium">{order.pickupBy}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${isCompleted ? 'bg-gray-100 text-gray-700 border-gray-300' : 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]'}`}>{isCompleted ? 'Completed' : 'Open'}</span></td></tr>; })} : (<tr><td colSpan="11" className="p-8 text-center text-[#999]">No purchase orders found</td></tr>)}</tbody></table></div>
+          <div className="overflow-x-auto max-h-[500px] border-t border-gray-100"><table className="w-full border-collapse text-[13px]"><thead className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] sticky top-0 z-20"><tr>{['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO rvd date', 'Pick-up by', 'Status'].map((h, i) => (<th key={i} className="p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{purchaseOrders.length > 0 ? purchaseOrders.map((order, index) => { const isCompleted = order.status === 'completed'; return (<tr key={index} onClick={() => { setSelectedReceiptPo(order); setShowReceiptModal(true); }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-[#e8f5e9]' : 'bg-[#e3f2fd]'} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium">{order.date}</td><td className="p-4 text-[#333] font-medium">{order.poNumber}</td><td className="p-4 text-[#333] font-medium">{poSummary(order).itemSummary}</td><td className="p-4 text-[#333] font-medium">{poSummary(order).totalQty}</td><td className="p-4 text-[#333] font-medium">{poSummary(order).unitSummary}</td><td className="p-4 text-[#333] font-medium">{order.supplier}</td><td className="p-4 text-[#333] font-medium">{order.requisitioner}</td><td className="p-4 text-[#333] font-medium">{order.mrsNo}</td><td className="p-4 text-[#333] font-medium">{order.poExpDate}</td><td className="p-4 text-[#333] font-medium">{order.pickupBy}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${isCompleted ? 'bg-gray-100 text-gray-700 border-gray-300' : 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]'}`}>{isCompleted ? 'Completed' : 'Open'}</span></td></tr>; })} : (<tr><td colSpan="11" className="p-8 text-center text-[#999]">No purchase orders found</td></tr>)}</tbody></table></div>
         ) : (
-          <div className="overflow-x-auto max-h-[500px] border-t border-gray-100"><table className="w-full min-w-[900px] border-collapse text-[13px]"><thead className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] sticky top-0 z-20"><tr>{['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'].map((h, i) => (<th key={i} className="p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30">{h}</th>))}</tr></thead><tbody>{requestsList.length > 0 ? requestsList.map((req, index) => (<tr key={index} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}><td className="p-4 text-[#333] font-medium">{req.date}</td><td className="p-4 text-[#333] font-medium">{req.reqNumber}</td><td className="p-4 text-[#333] font-medium">{req.mrsNo}</td><td className="p-4 text-[#333] font-medium">{req.itemDescription}</td><td className="p-4 text-[#333] font-medium">{req.qty}</td><td className="p-4 text-[#333] font-medium">{req.unit}</td><td className="p-4 text-[#333] font-medium">{req.requestedBy}</td><td className="p-4 text-[#333] font-medium">{req.requisitioner}</td><td className="p-4 text-[#333] font-medium">{req.approvedQty ?? '-'}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${req.status === 'Approved' ? 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]' : req.status === 'Pending' ? 'bg-[#fff9e6] text-[#f57f17] border-[#ffb74d]' : 'bg-[#ffebee] text-[#c62828] border-[#ef5350]'}`}>{req.status}</span></td></tr>)) : (<tr><td colSpan="10" className="p-8 text-center text-[#999]">No requests found</td></tr>)}</tbody></table></div>
+          <div className="overflow-x-auto max-h-[500px] border-t border-gray-100"><table className="w-full min-w-[900px] border-collapse text-[13px]"><thead className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] sticky top-0 z-20"><tr>{['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'].map((h, i) => (<th key={i} className="p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30">{h}</th>))}</tr></thead><tbody>{requestsList.length > 0 ? requestsList.map((req, index) => (<tr key={index} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}><td className="p-4 text-[#333] font-medium">{req.date}</td><td className="p-4 text-[#333] font-medium">{req.reqNumber}</td><td className="p-4 text-[#333] font-medium">{req.mrsNo}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).itemSummary}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).totalQty}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).unitSummary}</td><td className="p-4 text-[#333] font-medium">{req.requestedBy}</td><td className="p-4 text-[#333] font-medium">{req.requisitioner}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).totalApproved ?? '-'}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${req.status === 'Approved' ? 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]' : req.status === 'Pending' ? 'bg-[#fff9e6] text-[#f57f17] border-[#ffb74d]' : 'bg-[#ffebee] text-[#c62828] border-[#ef5350]'}`}>{req.status}</span></td></tr>)) : (<tr><td colSpan="10" className="p-8 text-center text-[#999]">No requests found</td></tr>)}</tbody></table></div>
         )}
       </div>
     </div>
@@ -425,7 +451,7 @@ function AdminDashboard() {
     <div className="bg-white rounded-lg p-6">
       <div className="flex items-start justify-between mb-8 max-md:flex-col max-md:gap-4"><div><h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Requests</h1><p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Pending requests from warehouses</p></div></div>
       <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
-        <div className="overflow-x-auto max-h-[500px]"><table className="w-full min-w-[900px] border-collapse text-[13px]"><thead><tr>{['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status', 'Actions'].map((h, i) => (<th key={i} className="bg-gradient-to-r from-[#fff8e1] to-[#ffe0b2] p-4 text-left font-bold text-[#f57f17] border-b-2 border-[#f57f17]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{filteredRequests.length > 0 ? filteredRequests.map((req, index) => (<tr key={index} className={`border-b border-gray-200 ${req.status === 'Approved' ? 'bg-[#e8f5e9]' : req.status === 'Partially Approved' ? 'bg-[#fff8e1]' : req.status === 'Pending' ? 'bg-[#fff9e6]' : 'bg-[#ffebee]'} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium">{req.date}</td><td className="p-4 text-[#333] font-medium">{req.reqNumber}</td><td className="p-4 text-[#333] font-medium">{req.mrsNo}</td><td className="p-4 text-[#333] font-medium">{req.itemDescription}</td><td className="p-4 text-[#333] font-medium">{req.qty}</td><td className="p-4 text-[#333] font-medium">{req.unit}</td><td className="p-4 text-[#333] font-medium">{req.requestedBy}</td><td className="p-4 text-[#333] font-medium">{req.requisitioner}</td><td className="p-4 text-[#333] font-medium">{req.approvedQty ?? '-'}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${req.status === 'Approved' ? 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]' : req.status === 'Partially Approved' ? 'bg-[#fff8e1] text-[#f57f17] border-[#ffcc80]' : req.status === 'Pending' ? 'bg-[#fff9e6] text-[#f57f17] border-[#ffb74d]' : 'bg-[#ffebee] text-[#c62828] border-[#ef5350]'}`}>{req.status}</span></td><td className="p-4"><div className="flex gap-2">{req.status === 'Pending' && <><button className="p-1.5 bg-[#2e7d32] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#1b5e20]" onClick={() => handleApproveRequest(req.reqNumber)}>Approve</button><button className="p-1.5 bg-[#d32f2f] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#b71c1c]" onClick={() => { setSelectedRequest(req); setIsDeclineMode(true); setShowRequestDetailsModal(true); }}>Decline</button></>}{req.status === 'Rejected' && <button className="p-1.5 bg-[#1e3c72] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#2a5298]" onClick={() => { setSelectedRequest(req); setShowRequestDetailsModal(true); }}>View</button>}</div></td></tr>)) : (<tr><td colSpan="11" className="p-8 text-center text-[#999]">No requests found</td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto max-h-[500px]"><table className="w-full min-w-[900px] border-collapse text-[13px]"><thead><tr>{['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Unit', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status', 'Actions'].map((h, i) => (<th key={i} className="bg-gradient-to-r from-[#fff8e1] to-[#ffe0b2] p-4 text-left font-bold text-[#f57f17] border-b-2 border-[#f57f17]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>))}</tr></thead><tbody>{filteredRequests.length > 0 ? filteredRequests.map((req, index) => (<tr key={index} className={`border-b border-gray-200 ${req.status === 'Approved' ? 'bg-[#e8f5e9]' : req.status === 'Partially Approved' ? 'bg-[#fff8e1]' : req.status === 'Pending' ? 'bg-[#fff9e6]' : 'bg-[#ffebee]'} hover:bg-[#f0f8fc]/50`}><td className="p-4 text-[#333] font-medium">{req.date}</td><td className="p-4 text-[#333] font-medium">{req.reqNumber}</td><td className="p-4 text-[#333] font-medium">{req.mrsNo}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).itemSummary}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).totalQty}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).unitSummary}</td><td className="p-4 text-[#333] font-medium">{req.requestedBy}</td><td className="p-4 text-[#333] font-medium">{req.requisitioner}</td><td className="p-4 text-[#333] font-medium">{reqSummary(req).totalApproved ?? '-'}</td><td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${req.status === 'Approved' ? 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]' : req.status === 'Partially Approved' ? 'bg-[#fff8e1] text-[#f57f17] border-[#ffcc80]' : req.status === 'Pending' ? 'bg-[#fff9e6] text-[#f57f17] border-[#ffb74d]' : 'bg-[#ffebee] text-[#c62828] border-[#ef5350]'}`}>{req.status}</span></td><td className="p-4"><div className="flex gap-2">{req.status === 'Pending' && <><button className="p-1.5 bg-[#2e7d32] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#1b5e20]" onClick={() => handleApproveRequest(req.reqNumber)}>Approve</button><button className="p-1.5 bg-[#d32f2f] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#b71c1c]" onClick={() => { setSelectedRequest(req); setIsDeclineMode(true); setShowRequestDetailsModal(true); }}>Decline</button></>}{req.status === 'Rejected' && <button className="p-1.5 bg-[#1e3c72] text-white border-none rounded text-[11px] font-bold cursor-pointer hover:bg-[#2a5298]" onClick={() => { setSelectedRequest(req); setShowRequestDetailsModal(true); }}>View</button>}</div></td></tr>)) : (<tr><td colSpan="11" className="p-8 text-center text-[#999]">No requests found</td></tr>)}</tbody></table></div>
       </div>
     </div>
   );

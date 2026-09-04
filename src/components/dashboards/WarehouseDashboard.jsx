@@ -57,9 +57,9 @@ function WarehouseDashboard() {
     setSelectedMonitoringPo(po);
     setMonPoNumber(po.poNumber || '');
     setMonPickupDate(po.date || '');
-    setMonDescription(po.itemDescription || '');
-    setMonQtyRvd(po.qty || '');
-    setMonUnit(po.unit || '');
+    setMonDescription((po.items || []).map((i) => i.itemDescription).join(', '));
+    setMonQtyRvd('');
+    setMonUnit(po.items?.length === 1 ? po.items[0].unit : (po.items?.length ? 'various' : ''));
     setMonDeliveredBy('');
     setMonDateDelivered('');
     setMonReferenceNo('');
@@ -79,7 +79,7 @@ function WarehouseDashboard() {
     setMonBusy(true);
     try {
       const qtyReceived = parseInt(monQtyRvd) || 0;
-      const originalQty = parseInt(selectedMonitoringPo.qty) || 0;
+      const originalQty = (selectedMonitoringPo.items || []).reduce((s, it) => s + (parseInt(it.qty) || 0), 0);
       const isCoincided = qtyReceived === originalQty;
       const finalStatus = isCoincided ? 'completed' : 'incomplete';
       const finalPoType = isCoincided ? 'completed' : 'discrepancy';
@@ -88,7 +88,6 @@ function WarehouseDashboard() {
         status: finalStatus,
         poType: finalPoType,
         statusLabel: finalStatusLabel,
-        qty: qtyReceived,
         pickupBy: monPickupBy,
         poExpDate: monDateDelivered,
         supplierAddress: selectedMonitoringPo.supplierAddress || 'Davao City',
@@ -118,9 +117,7 @@ function WarehouseDashboard() {
       await createRequest({
         date: new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }).replace(/\//g, '-'),
         reqNumber: `REQ-${Math.floor(10000 + Math.random() * 90000)}`,
-        itemDescription: reqItemDescription,
-        qty: parseInt(reqQty) || 0,
-        unit: reqUnit,
+        items: [{ itemDescription: reqItemDescription, qty: parseInt(reqQty) || 0, unit: reqUnit }],
         mrsNo: reqMrsNo,
         requestedBy: reqApprovedBy,
         requisitioner: 'Warehouse Site',
@@ -217,19 +214,25 @@ function WarehouseDashboard() {
                     </thead>
                     <tbody>
                       {filteredPOs.length > 0 ? (
-                        filteredPOs.map((order, index) => (
+                        filteredPOs.map((order, index) => {
+                          const items = order.items || [];
+                          const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                          const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                          const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
+                          return (
                           <tr key={order.poNumber || index} onClick={() => { if (order.status === 'incomplete' && order.poType === 'active-delivery') { handleOpenMonitoring(order); } else { handleOpenReceipt(order); } }} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer hover:bg-[#f0f8fc]/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
                             <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
                             <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                            <td className="p-4 text-[#333] font-medium">{order.itemDescription}</td>
-                            <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.qty}</td>
-                            <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.unit}</td>
+                            <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                            <td className="p-4 text-[#333] font-medium whitespace-nowrap">{totalQty}</td>
+                            <td className="p-4 text-[#333] font-medium whitespace-nowrap">{unitSummary}</td>
                             <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
                             <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
                             <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
                             <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
                           </tr>
-                        ))
+                          );
+                        })
                       ) : (
                         <tr><td colSpan="9" className="p-8 text-center text-[#999]">{posLoading ? 'Loading...' : 'No purchase orders found'}</td></tr>
                       )}
@@ -256,17 +259,23 @@ function WarehouseDashboard() {
                   </thead>
                   <tbody>
                     {requestsList.length > 0 ? (
-                      requestsList.map((req, index) => (
+                      requestsList.map((req, index) => {
+                        const items = req.items || [];
+                        const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                        const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                        const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
+                        return (
                         <tr key={req.reqNumber || index} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
                           <td className="p-4 text-[#333] font-medium">{req.date}</td>
                           <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.itemDescription}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.qty}</td>
-                          <td className="p-4 text-[#333] font-medium">{req.unit}</td>
+                          <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                          <td className="p-4 text-[#333] font-medium">{totalQty}</td>
+                          <td className="p-4 text-[#333] font-medium">{unitSummary}</td>
                           <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
                           <td className="p-4"><span className={`px-3 py-1 rounded-full text-[11px] font-bold border transition-colors duration-200 ${req.status === 'Approved' ? 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]' : req.status === 'Pending' ? 'bg-[#fff9e6] text-[#f57f17] border-[#ffb74d]' : 'bg-[#ffebee] text-[#c62828] border-[#ef5350]'}`}>{req.status}</span></td>
                         </tr>
-                      ))
+                        );
+                      })
                     ) : (
                       <tr><td colSpan="7" className="p-8 text-center text-[#999]">{reqLoading ? 'Loading...' : 'No requests found'}</td></tr>
                     )}

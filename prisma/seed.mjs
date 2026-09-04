@@ -69,7 +69,10 @@ async function main() {
   ];
 
   for (const po of pos) {
-    await prisma.purchaseOrder.create({ data: po });
+    const { itemDescription, qty, unit, ...rest } = po;
+    await prisma.purchaseOrder.create({
+      data: { ...rest, items: { create: [{ itemDescription, qty, unit }] } },
+    });
   }
 
   const requests = [
@@ -82,7 +85,18 @@ async function main() {
   ];
 
   for (const req of requests) {
-    await prisma.warehouseRequest.create({ data: req });
+    const { itemDescription, qty, unit, ...rest } = req;
+    await prisma.warehouseRequest.create({
+      data: {
+        ...rest,
+        items: {
+          create: [{
+            itemDescription, qty, unit,
+            approvedQty: rest.status === 'Approved' ? qty : null,
+          }],
+        },
+      },
+    });
   }
 
   console.log('Database seeded successfully!');
