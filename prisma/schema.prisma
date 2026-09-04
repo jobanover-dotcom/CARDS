@@ -38,17 +38,21 @@ model PurchaseOrder {
   statusLabel     String  @default("Open")
   warehouse       String
 
+  // Legacy aggregate monitoring fields retained for existing records.
+  // New monitoring writes per-item quantities to PurchaseOrderMonitoringItem.
   monQtyRvd        String?
   monDeliveredBy   String?
   monDateDelivered String?
   monReferenceNo   String?
   monDrDate        String?
   monRemarks       String?
+  monPlateNumber   String?
 
   profileId String?
   profile   Profile? @relation(fields: [profileId], references: [id])
 
-  items PurchaseOrderItem[]
+  items            PurchaseOrderItem[]
+  monitoringItems  PurchaseOrderMonitoringItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -63,6 +67,22 @@ model PurchaseOrderItem {
   unit            String
   createdAt       DateTime      @default(now())
 
+  monitoringItems PurchaseOrderMonitoringItem[]
+
+  @@index([poNumber])
+}
+
+model PurchaseOrderMonitoringItem {
+  id              String            @id @default(uuid())
+  poNumber        String
+  poItemId        String
+  po              PurchaseOrder     @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
+  poItem          PurchaseOrderItem @relation(fields: [poItemId], references: [id], onDelete: Cascade)
+  qtyReceived     Int               @default(0)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@unique([poItemId])
   @@index([poNumber])
 }
 
@@ -73,11 +93,11 @@ model WarehouseRequest {
   mrsNo               String
   requestedBy         String
   requisitioner       String
-  warehouse           String?
+  warehouse            String?
   status              String  @default("Pending")
   remarks             String?
-  followUpOfReqNumber String?    // follow-up of a previous REQUEST (partial approval)
-  followUpOfPoNumber  String?    // follow-up of a PARTIALLY RECEIVED PO
+  followUpOfReqNumber String?
+  followUpOfPoNumber  String?
 
   items WarehouseRequestItem[]
 
