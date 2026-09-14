@@ -4,6 +4,7 @@ import StatCard from '../ui/StatCard';
 import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
+import POQuantityTracker from '../shared/POQuantityTracker';
 import MonitoringDetailsForm from './MonitoringDetailsForm';
 import ReceiveDeliveryForm from './ReceiveDeliveryForm';
 import CreateRequestModal from './CreateRequestModal';
@@ -26,8 +27,8 @@ function isLegacyReceivable(order) {
 }
 
 function PurchaseOrdersView() {
-  const { completedCount, activeCount, partiallyReceivedCount, poVersion, getWarehouseV1Partials } = useWarehouseData();
-  const [selectedPoType, setSelectedPoType] = useState('completed');
+  const { completedCount, partiallyReceivedCount, openDeliveryCount: v1OpenCount, poVersion, getWarehouseV1Partials, getPOQuantityTracker } = useWarehouseData();
+  const [selectedPoType, setSelectedPoType] = useState('deliveries');
   const [poSearchInput, setPoSearchInput] = useState('');
   const [poSearchQuery, setPoSearchQuery] = useState('');
   const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
@@ -38,6 +39,9 @@ function PurchaseOrdersView() {
   const [openDeliveryCount, setOpenDeliveryCount] = useState(0);
   const [v1Partials, setV1Partials] = useState([]);
   const [v1PartialsError, setV1PartialsError] = useState(null);
+  const [trackerPoNumber, setTrackerPoNumber] = useState(null);
+  const [trackerData, setTrackerData] = useState(null);
+  const [trackerError, setTrackerError] = useState(null);
 
   const isDeliveries = selectedPoType === 'deliveries';
   const [followUpPoModal, setFollowUpPoModal] = useState(false);
@@ -52,12 +56,13 @@ function PurchaseOrdersView() {
 
   const queryParams = useMemo(() => {
     if (isDeliveries) return { statusIn: OPEN_DELIVERY_STATUSES };
+    // No 'active-delivery' tab: Open Deliveries is the single delivery-workload
+    // view. Legacy exception records (partially-received + discrepancy poType)
+    // stay visible together under Partially Received.
     return {
       ...(selectedPoType === 'completed'
         ? { status: 'completed' }
-        : selectedPoType === 'partially-received'
-          ? { status: 'incomplete', poType: 'partially-received' }
-          : { status: 'incomplete', poTypeIn: ['active-delivery', 'discrepancy'] }),
+        : { status: 'incomplete', poTypeIn: ['partially-received', 'discrepancy'] }),
       search: poSearchQuery || undefined,
     };
   }, [selectedPoType, poSearchQuery, isDeliveries]);
@@ -76,6 +81,17 @@ function PurchaseOrdersView() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [poVersion]);
+
+  const displayOpenCount = v1OpenCount || openDeliveryCount;
+
+  const openTracker = (poNumber) => {
+    setTrackerPoNumber(poNumber);
+    setTrackerData(null);
+    setTrackerError(null);
+    getPOQuantityTracker(poNumber)
+      .then((t) => setTrackerData(t))
+      .catch((e) => setTrackerError(e?.message || 'Failed to load tracker'));
+  };
 
   useEffect(() => {
     if (selectedPoType !== 'partially-received') return;
@@ -142,29 +158,7 @@ function PurchaseOrdersView() {
           onClick={() => setSelectedPoType('deliveries')}
         >
           <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Open Deliveries</h3>
-          <div className="text-5xl font-bold text-[#006680]">{openDeliveryCount}</div>
-        </div>
-        <div
-          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
-            selectedPoType === 'completed'
-              ? 'bg-gradient-to-br from-[#e3f2fd] to-[#bbdefb] border-2 border-[#1e3c72] shadow-[0_4px_16px_rgba(30,60,114,0.15)] scale-[1.02] -translate-y-1'
-              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#1e3c72]'
-          }`}
-          onClick={() => setSelectedPoType('completed')}
-        >
-          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Completed</h3>
-          <div className="text-5xl font-bold text-[#1e3c72]">{completedCount}</div>
-        </div>
-        <div
-          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
-            selectedPoType === 'active-delivery'
-              ? 'bg-gradient-to-br from-[#e8f5e9] to-[#c8e6c9] border-2 border-[#2e7d32] shadow-[0_4px_16px_rgba(46,125,50,0.15)] scale-[1.02] -translate-y-1'
-              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#2e7d32]'
-          }`}
-          onClick={() => setSelectedPoType('active-delivery')}
-        >
-          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Active Delivery</h3>
-          <div className="text-5xl font-bold text-[#2e7d32]">{activeCount}</div>
+          <div className="text-5xl font-bold text-[#006680]">{displayOpenCount}</div>
         </div>
         <div
           className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
@@ -177,15 +171,26 @@ function PurchaseOrdersView() {
           <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Partially Received</h3>
           <div className="text-5xl font-bold text-[#ef6c00]">{partiallyReceivedCount}</div>
         </div>
+        <div
+          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
+            selectedPoType === 'completed'
+              ? 'bg-gradient-to-br from-[#e3f2fd] to-[#bbdefb] border-2 border-[#1e3c72] shadow-[0_4px_16px_rgba(30,60,114,0.15)] scale-[1.02] -translate-y-1'
+              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#1e3c72]'
+          }`}
+          onClick={() => setSelectedPoType('completed')}
+        >
+          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Completed</h3>
+          <div className="text-5xl font-bold text-[#1e3c72]">{completedCount}</div>
+        </div>
       </div>
 
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedPoType === 'completed' ? 'Completed' : selectedPoType === 'partially-received' ? 'Partially Received' : selectedPoType === 'deliveries' ? 'Open Deliveries' : 'Active Delivery'}
+            {selectedPoType === 'completed' ? 'Completed' : selectedPoType === 'partially-received' ? 'Partially Received' : 'Open Deliveries'}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedPoType === 'completed' ? 'Successful Deliveries' : selectedPoType === 'partially-received' ? 'Short deliveries ready for follow-up' : selectedPoType === 'deliveries' ? 'Shipments awaiting warehouse receiving — click a row to receive' : 'Deliveries in process'}
+            {selectedPoType === 'completed' ? 'Successful Deliveries' : selectedPoType === 'partially-received' ? 'Short deliveries ready for follow-up' : 'Shipments awaiting warehouse receiving — click a row to receive'}
           </p>
         </div>
 
@@ -272,11 +277,11 @@ function PurchaseOrdersView() {
                     const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
                     const rows = p.items.filter((it) => it.requestOutstanding > 0);
                     return rows.map((it, idx) => (
-                      <tr key={`${p.poNumber}-${it.poItemId}`} className={`border-b border-gray-200 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                      <tr key={`${p.poNumber}-${it.poItemId}`} onClick={() => openTracker(p.poNumber)} className={`border-b border-gray-200 cursor-pointer hover:bg-[#fff8e1]/60 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
                         {idx === 0 && (
                           <td rowSpan={rows.length} className="p-4 text-[#333] font-bold whitespace-nowrap align-top">{p.poNumber}<div className="text-[10px] font-normal text-[#999]">{p.supplier}</div></td>
                         )}
-                        <td className="p-4 text-[#333] font-medium">{it.itemDescription}<div className="text-[10px] text-[#999]">shortfall: {it.shortfallSource}</div></td>
+                        <td className="p-4 text-[#333] font-medium">{it.itemDescription}<div className="text-[10px] text-[#999]">{it.statusReason || `shortfall: ${it.shortfallSource}`}</div></td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.requestedQty}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.approvedQty}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.purchasedQty}</td>
@@ -287,12 +292,15 @@ function PurchaseOrdersView() {
                           <td rowSpan={rows.length} className="p-4 align-top">
                             {!blocking ? (
                               <button
-                                onClick={() => {
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   setPoForFollowUp({ poNumber: p.poNumber });
-                                  setFollowUpBalance({ poNumber: p.poNumber, items: rows.map((r) => ({ itemDescription: r.itemDescription, unit: r.unit, maxQty: r.requestOutstanding })) });
+                                  setFollowUpBalance({ poNumber: p.poNumber, items: rows.filter((r) => r.procurementShortfall > 0).map((r) => ({ itemDescription: r.itemDescription, unit: r.unit, maxQty: r.procurementShortfall })) });
                                   setFollowUpPoModal(true);
                                 }}
-                                className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00]"
+                                disabled={!rows.some((r) => r.procurementShortfall > 0)}
+                                title={rows.some((r) => r.procurementShortfall > 0) ? 'Procurement follow-up capped at approved-minus-purchased' : 'No procurement shortfall — remaining units are already purchased'}
+                                className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00] disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 File Follow-Up
                               </button>
@@ -312,6 +320,7 @@ function PurchaseOrdersView() {
           </div>
         </div>
         )}
+        {selectedPoType !== 'partially-received' && (
         <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-[13px]">
@@ -391,6 +400,7 @@ function PurchaseOrdersView() {
             </table>
           </div>
         </div>
+        )}
         </>
         )}
         <p className="mt-2 text-right text-xs text-[#999]">Loaded {isDeliveries ? deliveries.length : purchaseOrders.length} of {total} {isDeliveries ? 'deliveries' : 'purchase orders'}</p>
@@ -424,6 +434,22 @@ function PurchaseOrdersView() {
             setFollowUpBalance(null);
           }}
         />
+      )}
+
+      {trackerPoNumber && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] overflow-y-auto py-6 px-4">
+          <div className="bg-white rounded-xl w-full max-w-[720px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
+            <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5">
+              <h2 className="m-0 text-lg font-bold text-[#333]">Quantity Tracker — {trackerPoNumber}</h2>
+              <button className="text-2xl text-[#888]" onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }}>&times;</button>
+            </div>
+            {trackerError && <p className="text-[13px] text-[#c62828]">{trackerError}</p>}
+            {!trackerError && <POQuantityTracker tracker={trackerData} variant="warehouse" />}
+            <div className="flex justify-end mt-4 pt-4 border-t border-[#eee]">
+              <button onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }} className="py-2.5 px-6 bg-white text-[#333] border border-[#ccc] rounded-md">Close</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

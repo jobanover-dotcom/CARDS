@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   assertValidPurchasedQty,
   buildItemChain,
+  deriveChainStatus,
   evaluatePOCompletion,
 } from '../deliveryQuantities'
 
@@ -164,5 +165,43 @@ describe('follow-up caps', () => {
 
   it('CASE B allows no follow-up', () => {
     expect(chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 10 }]).requestOutstanding).toBe(0)
+  })
+})
+
+describe('locked tracker contract: outstanding is reporting-only', () => {
+  // Bakal: 20 requested / 20 approved / 19 purchased / 10 delivered /
+  // 10 received → outstanding 10 = 1 procurement + 9 awaiting delivery.
+  // Maximum procurement follow-up = 1. The 9 must never be re-procurable.
+  it('Bakal: procurement=1, delivery-remaining=9, receiving=0, outstanding=10', () => {
+    const c = chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])
+    expect(c.procurementShortfall).toBe(1)
+    expect(c.deliveryRemaining).toBe(9)
+    expect(c.remainingToDeliver).toBe(9)
+    expect(c.receivingRemaining).toBe(0)
+    expect(c.remainingToReceive).toBe(0)
+    expect(c.requestOutstanding).toBe(10)
+    expect(c.approvalShortfall).toBe(0)
+  })
+
+  it('Bakal follow-up hard-block: 1 allowed, 2 and 10 rejected', () => {
+    const c = chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])
+    expect(1).toBeLessThanOrEqual(c.procurementShortfall)
+    expect(2).toBeGreaterThan(c.procurementShortfall)
+    expect(10).toBeGreaterThan(c.procurementShortfall)
+  })
+
+  it('partial approval never becomes procurement follow-up', () => {
+    // 20 requested / 18 approved / 18 purchased / 18 delivered / 18 received
+    const c = chain(20, 18, 18, [{ deliveredQty: 18, receivedQty: 18 }])
+    expect(c.approvalShortfall).toBe(2)
+    expect(c.procurementShortfall).toBe(0)
+    expect(c.deliveryRemaining).toBe(0)
+  })
+
+  it('deriveChainStatus never uses outstanding alone', () => {
+    expect(deriveChainStatus(chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])).status).toBe('awaiting-purchase')
+    expect(deriveChainStatus(chain(20, 18, 18, [{ deliveredQty: 18, receivedQty: 18 }])).status).toBe('approval-shortfall')
+    expect(deriveChainStatus(chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 9 }])).status).toBe('awaiting-receiving')
+    expect(deriveChainStatus(chain(20, 20, 20, [{ deliveredQty: 20, receivedQty: 20 }])).status).toBe('complete')
   })
 })

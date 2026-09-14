@@ -9,6 +9,7 @@ import {
   assertValidPurchasedQty,
   assertValidReceivedQty,
   buildItemChain,
+  deriveChainStatus,
   evaluatePOCompletion,
   remainingToDeliver,
   type ItemChain,
@@ -68,7 +69,15 @@ async function lockPO(tx: Tx, poNumber: string) {
   await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "poNumber" = ${poNumber} FOR UPDATE`;
 }
 
+// Globally serializes delivery-number allocation. lockPO() only locks one PO
+// row, so two concurrent proceedToDelivery calls on DIFFERENT POs could
+// otherwise read the same max and collide on the unique deliveryNumber.
+async function lockDeliveryNumbering(tx: Tx) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('cards_delivery_numbering'))`;
+}
+
 async function nextDeliveryNumber(tx: Tx, year: number) {
+  await lockDeliveryNumbering(tx);
   const prefix = `DEL-${year}-`;
   const latest = await tx.delivery.findFirst({
     where: { deliveryNumber: { startsWith: prefix } },
@@ -76,6 +85,7 @@ async function nextDeliveryNumber(tx: Tx, year: number) {
     select: { deliveryNumber: true },
   });
   const next = latest ? parseInt(latest.deliveryNumber.slice(prefix.length), 10) + 1 : 1;
+  if (!Number.isInteger(next) || next < 1) throw new Error('Failed to allocate delivery number');
   return `${prefix}${String(next).padStart(4, '0')}`;
 }
 
@@ -87,6 +97,16 @@ async function assertSourceRequestApprovable(tx: Tx, mrsNo: string) {
     throw new Error(`Source request ${mrsNo} is ${req.status}; only approved requests can proceed to delivery`);
 }
 
+export interface TrackerDeliveryRow {
+  deliveryId: string
+  deliveryNumber: string
+  deliveredQty: number
+  receivedQty: number
+  remainingToReceive: number
+  status: string
+  statusLabel: string | null
+}
+
 export interface FollowUpChainRow extends ItemChain {
   poItemId: string
   itemDescription: string
@@ -95,6 +115,11 @@ export interface FollowUpChainRow extends ItemChain {
   shortfallSource: 'approval' | 'procurement' | 'receiving' | 'none'
   /** true when a follow-up request may be filed for this line */
   followUpEligible: boolean
+  /** unified tracker status — derived from individual balances, never outstanding alone */
+  status: string
+  statusReason: string
+  /** every physical shipment touching this PO item */
+  deliveries: TrackerDeliveryRow[]
 }
 
 function matchRequestItem(reqItems: { itemDescription: string; qty: number; approvedQty: number | null }[], description: string) {
@@ -126,13 +151,24 @@ async function loadSourceRequest(
 // Authoritative per-item chain, computed from the database inside the
 // caller's transaction. Single source of truth for completion, follow-up
 // balances, and warehouse outstanding displays — never duplicated elsewhere.
+//
+// HARD RULE: requestOutstanding is REPORTING ONLY. Procurement, delivery,
+// and receiving actions must use procurementShortfall / deliveryRemaining /
+// receivingRemaining respectively. A purchased-but-undelivered unit must
+// never become procurement follow-up eligible merely because it is unreceived.
 export async function buildPOChains(tx: Tx, poNumber: string): Promise<{
   chains: FollowUpChainRow[]
   sourceReqNumber: string | null
 }> {
   const po = await tx.purchaseOrder.findUnique({
     where: { poNumber },
-    include: { items: { include: { deliveryItems: true } } },
+    include: {
+      items: {
+        include: {
+          deliveryItems: { include: { delivery: { select: { id: true, deliveryNumber: true, status: true, statusLabel: true } } } },
+        },
+      },
+    },
   });
   if (!po) throw new Error('Purchase order not found');
   const source = await loadSourceRequest(tx, po);
@@ -152,13 +188,28 @@ export async function buildPOChains(tx: Tx, poNumber: string): Promise<{
           : chain.procurementShortfall > 0
             ? 'procurement'
             : 'receiving';
+    const { status, statusReason } = deriveChainStatus(chain);
+    const deliveries: TrackerDeliveryRow[] = item.deliveryItems.map((d) => ({
+      deliveryId: d.deliveryId,
+      deliveryNumber: d.delivery?.deliveryNumber ?? '—',
+      deliveredQty: d.deliveredQty,
+      receivedQty: d.receivedQty,
+      remainingToReceive: Math.max(0, d.deliveredQty - d.receivedQty),
+      status: d.delivery?.status ?? 'unknown',
+      statusLabel: d.delivery?.statusLabel ?? null,
+    }));
     return {
       ...chain,
       poItemId: item.id,
       itemDescription: item.itemDescription,
       unit: item.unit,
       shortfallSource,
-      followUpEligible: chain.requestOutstanding > 0,
+      // Procurement follow-up eligibility is procurementShortfall ONLY —
+      // never the full outstanding. See createRequest hard-block.
+      followUpEligible: chain.procurementShortfall > 0,
+      status,
+      statusReason,
+      deliveries,
     };
   });
   return { chains, sourceReqNumber: source ? source.reqNumber : null };
@@ -175,8 +226,36 @@ export interface POFollowUpBalance {
     delivered: number
     received: number
     outstanding: number
+    approvalShortfall: number
+    procurementShortfall: number
+    remainingToDeliver: number
+    remainingToReceive: number
   }
   canComplete: boolean
+}
+
+export interface POQuantityTracker extends POFollowUpBalance {
+  supplier: string
+  mrsNo: string
+  status: string
+  statusLabel: string
+  warehouse: string
+}
+
+function sumTotals(chains: FollowUpChainRow[]) {
+  const sum = (f: (c: FollowUpChainRow) => number) => chains.reduce((s, c) => s + f(c), 0);
+  return {
+    requested: sum((c) => c.requestedQty),
+    approved: sum((c) => c.approvedQty),
+    purchased: sum((c) => c.purchasedQty),
+    delivered: sum((c) => c.deliveredQty),
+    received: sum((c) => c.receivedQty),
+    outstanding: sum((c) => c.requestOutstanding),
+    approvalShortfall: sum((c) => c.approvalShortfall),
+    procurementShortfall: sum((c) => c.procurementShortfall),
+    remainingToDeliver: sum((c) => c.deliveryRemaining),
+    remainingToReceive: sum((c) => c.receivingRemaining),
+  };
 }
 
 // Server-side V1 follow-up balance. Feeds the warehouse follow-up UI and
@@ -196,20 +275,45 @@ export async function getPOFollowUpBalance(poNumber: string): Promise<POFollowUp
     const hasOpenDiscrepancy =
       fresh?.deliveries.some((d) => d.status === DELIVERY_STATUS.DISCREPANCY.value) ?? false;
     const completion = evaluatePOCompletion({ chains, hasOpenDiscrepancy });
-    const sum = (f: (c: FollowUpChainRow) => number) => chains.reduce((s, c) => s + f(c), 0);
     return {
       poNumber,
       sourceReqNumber,
       items: chains,
-      totals: {
-        requested: sum((c) => c.requestedQty),
-        approved: sum((c) => c.approvedQty),
-        purchased: sum((c) => c.purchasedQty),
-        delivered: sum((c) => c.deliveredQty),
-        received: sum((c) => c.receivedQty),
-        outstanding: completion.requestOutstanding,
-      },
+      totals: sumTotals(chains),
       canComplete: completion.canComplete,
+    };
+  });
+}
+
+// Unified tracker: the SAME server response feeds the warehouse summary,
+// the warehouse tracker, and the purchaser procurement & delivery tracker.
+// Frontend renders only — all math happens in buildPOChains.
+export async function getPOQuantityTracker(poNumber: string): Promise<POQuantityTracker> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  return prisma.$transaction(async (tx) => {
+    const po = await tx.purchaseOrder.findUnique({ where: { poNumber } });
+    if (!po) throw new Error('Purchase order not found');
+    if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+    const { chains, sourceReqNumber } = await buildPOChains(tx, poNumber);
+    const fresh = await tx.purchaseOrder.findUnique({
+      where: { poNumber },
+      select: { status: true, deliveries: { select: { status: true } } },
+    });
+    const hasOpenDiscrepancy =
+      fresh?.deliveries.some((d) => d.status === DELIVERY_STATUS.DISCREPANCY.value) ?? false;
+    const completion = evaluatePOCompletion({ chains, hasOpenDiscrepancy });
+    return {
+      poNumber,
+      sourceReqNumber,
+      items: chains,
+      totals: sumTotals(chains),
+      canComplete: completion.canComplete,
+      supplier: po.supplier,
+      mrsNo: po.mrsNo,
+      status: po.status,
+      statusLabel: po.statusLabel,
+      warehouse: po.warehouse,
     };
   });
 }
@@ -247,10 +351,11 @@ export async function getWarehouseV1Partials() {
 }
 
 // V1 warehouse statistics derived from Delivery/DeliveryItem aggregates —
-// never from poType.
+// never from poType. outstandingPOCount reuses getWarehouseV1Partials so the
+// Follow-Up Required card always matches the rows in the follow-up table.
 export async function getV1WarehouseStats() {
   const user = await getCurrentUser();
-  if (!user) return { openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0 };
+  if (!user) return { openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0, outstandingPOCount: 0 };
   const scope = user.role === 'Warehouse' ? { po: { warehouse: user.warehouse } } : {};
   const poScope = user.role === 'Warehouse' ? { warehouse: user.warehouse } : {};
   const [openDeliveryCount, discrepancyDeliveryCount, readyPOCount, partialDeliveries] = await prisma.$transaction([
@@ -282,6 +387,7 @@ export async function getV1WarehouseStats() {
     discrepancyDeliveryCount,
     partialPOCount: new Set(partialDeliveries.map((d) => d.poNumber)).size,
     readyPOCount,
+    outstandingPOCount: (await getWarehouseV1Partials()).length,
   };
 }
 
@@ -337,10 +443,15 @@ export async function confirmPurchase(input: { poNumber: string; items: { poItem
 
     const inputMap = new Map(parsed.items.map((i) => [i.poItemId, i.purchasedQty]));
     if (inputMap.size !== po.items.length) throw new Error('Every PO item must have a purchased quantity');
+    // Cap against live approved quantities from the source request — never
+    // against the PO snapshot alone, which may predate an approval amendment.
+    const source = await loadSourceRequest(tx, po);
     for (const item of po.items) {
       const qty = inputMap.get(item.id);
       if (qty === undefined) throw new Error(`Missing purchased quantity for "${item.itemDescription}"`);
-      assertValidPurchasedQty(qty, item.qty, item.itemDescription);
+      const matched = source ? matchRequestItem(source.items, item.itemDescription) : null;
+      const maxQty = matched ? (matched.approvedQty ?? matched.qty) : item.qty;
+      assertValidPurchasedQty(qty, maxQty, item.itemDescription);
       await tx.purchaseOrderItem.update({ where: { id: item.id }, data: { purchasedQty: qty } });
     }
     const updated = await tx.purchaseOrder.update({

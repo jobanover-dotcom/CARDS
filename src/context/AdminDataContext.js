@@ -1,7 +1,7 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
-import { confirmPurchase as confirmPurchaseServer, markReadyForDelivery as markReadyForDeliveryServer, proceedToDelivery as proceedToDeliveryServer } from '../../actions/deliveries';
+import { confirmPurchase as confirmPurchaseServer, markReadyForDelivery as markReadyForDeliveryServer, proceedToDelivery as proceedToDeliveryServer, getPOQuantityTracker as getPOQuantityTrackerServer, getV1WarehouseStats as getV1WarehouseStatsServer } from '../../actions/deliveries';
 import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
@@ -16,6 +16,7 @@ export function AdminDataProvider({ children }) {
     activeDeliveryCount: 0, discrepancyCount: 0,
   });
   const [requestCounts, setRequestCounts] = useState({ total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0 });
+  const [v1Stats, setV1Stats] = useState({ openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0 });
   const [loading, setLoading] = useState(true);
   const [poVersion, setPoVersion] = useState(0);
   const [requestVersion, setRequestVersion] = useState(0);
@@ -23,7 +24,9 @@ export function AdminDataProvider({ children }) {
 
   const refreshStats = useCallback(async () => {
     try {
-      setStats(await getPOStats());
+      const [legacy, v1] = await Promise.all([getPOStats(), getV1WarehouseStatsServer()]);
+      setStats(legacy);
+      setV1Stats(v1);
     } catch (e) {
       console.error('Failed to load PO stats', e);
     }
@@ -134,10 +137,13 @@ export function AdminDataProvider({ children }) {
     return delivery;
   }, [refreshStats]);
 
+  const getPOQuantityTracker = useCallback(async (poNumber) => getPOQuantityTrackerServer(poNumber), []);
+
   return (
     <AdminDataContext.Provider value={{
       warehouses,
       stats,
+      v1Stats,
       requestCounts,
       loading,
       poVersion,
@@ -145,7 +151,7 @@ export function AdminDataProvider({ children }) {
       userVersion,
       refreshStats,
       createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
-      confirmPurchase, markReadyForDelivery, proceedToDelivery,
+      confirmPurchase, markReadyForDelivery, proceedToDelivery, getPOQuantityTracker,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
       addWarehouse: handleAddWarehouse,

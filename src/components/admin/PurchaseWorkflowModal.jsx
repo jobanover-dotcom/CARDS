@@ -1,6 +1,7 @@
 'use client';
 import React, { useEffect, useMemo, useState } from 'react';
 import StatusBadge from '../ui/StatusBadge';
+import POQuantityTracker from '../shared/POQuantityTracker';
 import { useAdminData } from '../../context/AdminDataContext';
 import { getPOByNumber } from '../../../actions/pos';
 import { getDeliveries, getRemainingDeliverable } from '../../../actions/deliveries';
@@ -14,9 +15,11 @@ function today() {
 }
 
 function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
-  const { confirmPurchase, markReadyForDelivery, proceedToDelivery } = useAdminData();
+  const { confirmPurchase, markReadyForDelivery, proceedToDelivery, getPOQuantityTracker } = useAdminData();
   const [po, setPo] = useState(null);
   const [remaining, setRemaining] = useState(null);
+  const [tracker, setTracker] = useState(null);
+  const [trackerError, setTrackerError] = useState(null);
   const [deliveries, setDeliveries] = useState([]);
   const [purchased, setPurchased] = useState({});
   const [deliverQty, setDeliverQty] = useState({});
@@ -32,6 +35,11 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
   const reload = async () => {
     const fresh = await getPOByNumber(poNumber);
     setPo(fresh);
+    try {
+      const t = await getPOQuantityTracker(poNumber);
+      setTracker(t);
+      setTrackerError(null);
+    } catch (e) { setTrackerError(e?.message || 'Tracker unavailable'); }
     if (fresh && (fresh.status === PO_STATUS.READY_FOR_DELIVERY.value || fresh.status === 'completed')) {
       try {
         const [rem, dels] = await Promise.all([
@@ -55,6 +63,12 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
           const init = {};
           for (const item of fresh.items || []) init[item.id] = String(item.purchasedQty ?? item.qty);
           setPurchased(init);
+          try {
+            const t = await getPOQuantityTracker(poNumber);
+            if (!cancelled) { setTracker(t); setTrackerError(null); }
+          } catch (e) {
+            if (!cancelled) setTrackerError(e?.message || 'Tracker unavailable');
+          }
           if (fresh.status === PO_STATUS.READY_FOR_DELIVERY.value || fresh.status === 'completed') {
             const [rem, dels] = await Promise.all([
               getRemainingDeliverable(poNumber),
@@ -153,7 +167,11 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
 
   const clampPurchased = (item, value) => {
     const raw = value.replace(/[^0-9]/g, '');
-    const qty = raw === '' ? '' : Math.min(Number(raw), item.qty);
+    // Client-side input mask only — the server caps against live approved
+    // quantities and rejects over-claims. Tracker approved is preferred.
+    const tracked = (tracker?.items || []).find((t) => t.poItemId === item.id);
+    const max = tracked ? tracked.approvedQty : item.qty;
+    const qty = raw === '' ? '' : Math.min(Number(raw), max);
     setPurchased((prev) => ({ ...prev, [item.id]: String(qty) }));
   };
 
@@ -182,6 +200,18 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
             <div><label className="text-[11px] font-bold text-[#444]">SUPPLIER</label><input value={po.supplier || ''} disabled className={`${inputClass} bg-gray-50`} /></div>
             <div><label className="text-[11px] font-bold text-[#444]">MRS NO.</label><input value={po.mrsNo || ''} disabled className={`${inputClass} bg-gray-50`} /></div>
           </div>
+
+          <div className="border border-[#e0e0e0] rounded-lg p-3 mb-4 bg-[#fafafa]">
+            <h3 className={sectionTitle}>Procurement &amp; Delivery Tracker — same quantities as Warehouse</h3>
+            {trackerError && <p className="text-[12px] text-[#c62828] mt-2">{trackerError}</p>}
+            {!trackerError && <div className="mt-2"><POQuantityTracker tracker={tracker} variant="purchaser" /></div>}
+          </div>
+
+          {tracker && tracker.totals.remainingToReceive > 0 && tracker.totals.remainingToDeliver === 0 && (
+            <div className="mb-4 p-3 bg-[#fff8e1] text-[#8d6e00] border border-[#ffcc80] rounded-md text-xs font-semibold">
+              Receiving discrepancy — {tracker.totals.remainingToReceive} unit(s) delivered but not yet received. This belongs to the receiving/discrepancy workflow: do not create another purchase or delivery for it.
+            </div>
+          )}
 
           {canConfirm && (
             <form onSubmit={handleConfirm} className="border border-[#eee] rounded-lg p-3 mb-4">

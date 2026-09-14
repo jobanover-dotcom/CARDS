@@ -5,6 +5,7 @@ import StatCard from '../ui/StatCard';
 import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
+import POQuantityTracker from '../shared/POQuantityTracker';
 import POCreationForm from './POCreationForm';
 import PurchaseWorkflowModal from './PurchaseWorkflowModal';
 import StatusBadge from '../ui/StatusBadge';
@@ -15,7 +16,7 @@ import { getPOs } from '../../../actions/pos';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function PurchaseOrderContent() {
-  const { stats, poVersion, deletePO } = useAdminData();
+  const { stats, v1Stats, poVersion, deletePO, getPOQuantityTracker } = useAdminData();
   const searchParams = useSearchParams();
   const [selectedPoType, setSelectedPoType] = useState('all');
   const [poSearchInput, setPoSearchInput] = useState('');
@@ -25,6 +26,18 @@ function PurchaseOrderContent() {
   const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [workflowPoNumber, setWorkflowPoNumber] = useState(null);
+  const [trackerPoNumber, setTrackerPoNumber] = useState(null);
+  const [trackerData, setTrackerData] = useState(null);
+  const [trackerError, setTrackerError] = useState(null);
+
+  const openTracker = (poNumber) => {
+    setTrackerPoNumber(poNumber);
+    setTrackerData(null);
+    setTrackerError(null);
+    getPOQuantityTracker(poNumber)
+      .then((t) => setTrackerData(t))
+      .catch((e) => setTrackerError(e?.message || 'Failed to load tracker'));
+  };
 
   const [initialFormData, setInitialFormData] = useState(null);
 
@@ -93,7 +106,7 @@ function PurchaseOrderContent() {
       <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
         <StatCard label="Total POs" count={stats.totalPOs} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
         <StatCard label="Active Delivery" count={stats.activeDeliveryCount} description="Orders currently in delivery" color="green" isActive={selectedPoType === 'active-delivery'} onClick={() => setSelectedPoType('active-delivery')} />
-        <StatCard label="Discrepancies" count={stats.discrepancyCount} description="Orders with issues" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
+        <StatCard label="Discrepancies" count={(stats.discrepancyCount || 0) + (v1Stats?.discrepancyDeliveryCount || 0)} description="Orders with issues (legacy + V1 receiving)" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
       </div>
 
       <div className="mb-6">
@@ -151,6 +164,12 @@ function PurchaseOrderContent() {
                           >
                             Manage
                           </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); openTracker(order.poNumber); }}
+                            className="ml-2 bg-white text-[#555] border border-[#ccc] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#f5f5f5]"
+                          >
+                            Tracker
+                          </button>
                         </td>
                       </tr>
                       );
@@ -190,6 +209,23 @@ function PurchaseOrderContent() {
 
       {workflowPoNumber && (
         <PurchaseWorkflowModal poNumber={workflowPoNumber} onClose={() => setWorkflowPoNumber(null)} />
+      )}
+
+      {trackerPoNumber && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] overflow-y-auto py-6 px-4">
+          <div className="bg-white rounded-xl w-full max-w-[720px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
+            <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5">
+              <h2 className="m-0 text-lg font-bold text-[#333]">Quantity Tracker — {trackerPoNumber}</h2>
+              <button className="text-2xl text-[#888]" onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }}>&times;</button>
+            </div>
+            {trackerError && <p className="text-[13px] text-[#c62828]">{trackerError}</p>}
+            {!trackerError && <POQuantityTracker tracker={trackerData} variant="purchaser" />}
+            <div className="flex justify-end gap-3 mt-4 pt-4 border-t border-[#eee]">
+              <button onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }} className="py-2.5 px-6 bg-white text-[#333] border border-[#ccc] rounded-md">Close</button>
+              <button onClick={() => { setTrackerPoNumber(null); setTrackerData(null); setWorkflowPoNumber(trackerPoNumber); }} className="py-2.5 px-6 bg-[#006680] text-white rounded-md">Open Workflow</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

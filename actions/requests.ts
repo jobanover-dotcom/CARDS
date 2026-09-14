@@ -88,16 +88,20 @@ export async function createRequest(data: {
       const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
       const isV1 = isV1WorkflowPO(source);
       if (isV1) {
-        // V1 POs: balance = requestOutstanding from DeliveryItem data, never
-        // legacy monitoring quantities.
+        // V1 POs — HARD-BLOCK: procurement follow-up is capped at
+        // procurementShortfall (approved - purchased) ONLY. requestOutstanding
+        // is reporting-only and must never authorize procurement. A purchased-
+        // but-undelivered unit belongs to the delivery workflow, not to a new
+        // procurement. No override: approved-qty changes need a separate
+        // approval/amendment workflow.
         const { chains } = await buildPOChains(tx, rest.followUpOfPoNumber);
         const claimed = (desc: string) => requestedByDescription.get(desc.trim().toLowerCase()) ?? 0;
         for (const chain of chains) {
-          if (claimed(chain.itemDescription) > chain.requestOutstanding)
-            throw new Error(`Follow-up qty for "${chain.itemDescription}" cannot exceed the outstanding balance of ${chain.requestOutstanding} ${chain.unit}`);
+          if (claimed(chain.itemDescription) > chain.procurementShortfall)
+            throw new Error(`Follow-up qty for "${chain.itemDescription}" cannot exceed the procurement shortfall of ${chain.procurementShortfall} ${chain.unit} (approved ${chain.approvedQty}, purchased ${chain.purchasedQty}). ${chain.deliveryRemaining} unit(s) are already purchased and awaiting delivery — track them through deliveries, not a new procurement.`);
         }
-        if (!chains.some((c) => claimed(c.itemDescription) > 0 && claimed(c.itemDescription) <= c.requestOutstanding))
-          throw new Error('No requested item has an outstanding delivery balance');
+        if (!chains.some((c) => claimed(c.itemDescription) > 0 && claimed(c.itemDescription) <= c.procurementShortfall))
+          throw new Error('No requested item has a procurement shortfall available for follow-up');
       } else {
         for (const sourceItem of source.items) {
           const received = sourceItem.monitoringItems[0]?.qtyReceived ?? 0;

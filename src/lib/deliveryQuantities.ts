@@ -15,16 +15,6 @@ export interface RemainingInput {
   deliveries: DeliveryQtyRow[]
 }
 
-export interface DeliveryQtyRow {
-  deliveredQty: number
-  receivedQty: number
-}
-
-export interface RemainingInput {
-  purchasedQty: number | null | undefined
-  deliveries: DeliveryQtyRow[]
-}
-
 export function remainingToDeliver(input: RemainingInput): number {
   const purchased = input.purchasedQty ?? 0
   const delivered = input.deliveries.reduce((sum, d) => sum + d.deliveredQty, 0)
@@ -94,14 +84,59 @@ export interface ItemChain {
   deliveryRemaining: number
   /** delivered - received: received short of what was shipped */
   receivingRemaining: number
-  /** max(0, requested - received): the follow-up quantity */
+  /** max(0, requested - received): REPORTING ONLY — never drives actions */
   requestOutstanding: number
   /** max(0, requested - approved): shortfall born at approval */
   approvalShortfall: number
-  /** max(0, approved - purchased): shortfall born at procurement */
+  /** max(0, approved - purchased): the ONLY procurement follow-up allowance */
   procurementShortfall: number
   /** delivered - received: shortfall born at receiving */
   receivingShortfall: number
+  /** aliases for the unified tracker contract */
+  remainingToDeliver: number
+  remainingToReceive: number
+}
+
+export type ChainStatus =
+  | 'complete'
+  | 'awaiting-purchase'
+  | 'awaiting-delivery'
+  | 'awaiting-receiving'
+  | 'approval-shortfall'
+  | 'no-activity'
+
+export interface ChainStatusResult {
+  status: ChainStatus
+  /** human explanation rendered verbatim by the tracker UI */
+  statusReason: string
+}
+
+/**
+ * Single status derivation for the unified tracker. Priority:
+ * complete > approval shortfall > awaiting purchase > awaiting delivery >
+ * awaiting receiving > no activity. requestOutstanding is never used here.
+ */
+export function deriveChainStatus(c: {
+  approvalShortfall: number
+  procurementShortfall: number
+  deliveryRemaining: number
+  receivingRemaining: number
+  requestOutstanding: number
+  purchasedQty: number
+}): ChainStatusResult {
+  if (c.requestOutstanding === 0 && c.procurementShortfall === 0)
+    return { status: 'complete', statusReason: 'All requested units received' }
+  if (c.approvalShortfall > 0)
+    return { status: 'approval-shortfall', statusReason: `${c.approvalShortfall} never approved — not eligible for procurement follow-up` }
+  if (c.procurementShortfall > 0)
+    return { status: 'awaiting-purchase', statusReason: `${c.procurementShortfall} approved but not purchased` }
+  if (c.deliveryRemaining > 0)
+    return { status: 'awaiting-delivery', statusReason: `${c.deliveryRemaining} purchased, awaiting delivery` }
+  if (c.receivingRemaining > 0)
+    return { status: 'awaiting-receiving', statusReason: `${c.receivingRemaining} delivered but not yet received` }
+  if (c.purchasedQty === 0)
+    return { status: 'no-activity', statusReason: 'No purchasing activity yet' }
+  return { status: 'awaiting-receiving', statusReason: `${c.requestOutstanding} outstanding` }
 }
 
 export function buildItemChain(input: ItemChainInput): ItemChain {
@@ -110,6 +145,8 @@ export function buildItemChain(input: ItemChainInput): ItemChain {
   const purchasedQty = Math.max(0, input.purchasedQty ?? 0)
   const deliveredQty = totalDelivered(input.deliveries)
   const receivedQty = totalReceived(input.deliveries)
+  const deliveryRemaining = Math.max(0, purchasedQty - deliveredQty)
+  const receivingRemaining = Math.max(0, deliveredQty - receivedQty)
   return {
     requestedQty,
     approvedQty,
@@ -117,12 +154,14 @@ export function buildItemChain(input: ItemChainInput): ItemChain {
     deliveredQty,
     receivedQty,
     procurementRemaining: Math.max(0, requestedQty - approvedQty),
-    deliveryRemaining: Math.max(0, purchasedQty - deliveredQty),
-    receivingRemaining: Math.max(0, deliveredQty - receivedQty),
+    deliveryRemaining,
+    receivingRemaining,
     requestOutstanding: Math.max(0, requestedQty - receivedQty),
     approvalShortfall: Math.max(0, requestedQty - approvedQty),
     procurementShortfall: Math.max(0, approvedQty - purchasedQty),
     receivingShortfall: Math.max(0, deliveredQty - receivedQty),
+    remainingToDeliver: deliveryRemaining,
+    remainingToReceive: receivingRemaining,
   }
 }
 
