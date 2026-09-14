@@ -6,6 +6,8 @@ import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import POCreationForm from './POCreationForm';
+import PurchaseWorkflowModal from './PurchaseWorkflowModal';
+import StatusBadge from '../ui/StatusBadge';
 import PageSkeleton from '../ui/PageSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
@@ -22,6 +24,7 @@ function PurchaseOrderContent() {
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [workflowPoNumber, setWorkflowPoNumber] = useState(null);
 
   const [initialFormData, setInitialFormData] = useState(null);
 
@@ -114,7 +117,7 @@ function PurchaseOrderContent() {
             <table className="w-full border-collapse text-[13px]">
               <thead className={`bg-gradient-to-r sticky top-0 z-10 ${selectedPoType === 'all' ? 'from-[#e3f2fd] to-[#bbdefb]' : selectedPoType === 'active-delivery' ? 'from-[#e8f5e9] to-[#c8e6c9]' : 'from-[#fef5f5] to-[#ffcdd2]'}`}>
                 <tr>
-                  {['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by'].map((h, i) => (
+                  {['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by', 'Status', 'Action'].map((h, i) => (
                     <th key={i} className={`p-4 text-left font-bold whitespace-nowrap ${selectedPoType === 'all' ? 'text-[#1e3c72] border-b-2 border-[#1e3c72]/30' : selectedPoType === 'active-delivery' ? 'text-[#2e7d32] border-b-2 border-[#2e7d32]/30' : 'text-[#c62828] border-b-2 border-[#c62828]/30'}`}>{h}</th>
                   ))}
                 </tr>
@@ -140,13 +143,22 @@ function PurchaseOrderContent() {
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
                         <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
+                        <td className="p-4 whitespace-nowrap"><StatusBadge status={order.statusLabel || order.status} /></td>
+                        <td className="p-4 whitespace-nowrap">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setWorkflowPoNumber(order.poNumber); }}
+                            className="bg-white text-[#006680] border border-[#80c0d0] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#e8f4f6] hover:border-[#006680]"
+                          >
+                            Manage
+                          </button>
+                        </td>
                       </tr>
                       );
                     })}
-                    <TableScrollSentinel colSpan={10} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                    <TableScrollSentinel colSpan={12} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
                   </>
                 ) : (
-                  <EmptyState colSpan={10} message="No purchase orders found" />
+                  <EmptyState colSpan={12} message="No purchase orders found" />
                 )}
               </tbody>
             </table>
@@ -165,7 +177,7 @@ function PurchaseOrderContent() {
             <div className="flex flex-col items-center gap-3">
               <div className="bg-[#e8f5e9] text-[#2e7d32] text-3xl w-16 h-16 rounded-full flex items-center justify-center mb-3 border-2 border-[#a5d6a7] font-bold">&#10003;</div>
               <h3 className="m-0 text-lg text-[#333] font-bold">Successfully Added</h3>
-              <p className="m-0 text-[13px] text-[#666] leading-relaxed mb-4">The purchase order has been successfully added to Active Delivery.</p>
+              <p className="m-0 text-[13px] text-[#666] leading-relaxed mb-4">The purchase order has been successfully added as Awaiting Purchase.</p>
               <button className="bg-[#2e7d32] text-white border-none py-2.5 px-8 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 min-w-[100px] hover:bg-[#1b5e20] hover:shadow-[0_2px_8px_rgba(46,125,50,0.3)] hover:-translate-y-0.5" onClick={() => setShowSuccessModal(false)}>OK</button>
             </div>
           </div>
@@ -174,6 +186,10 @@ function PurchaseOrderContent() {
 
       {showReceiptModal && selectedReceiptPo && (
         <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
+      )}
+
+      {workflowPoNumber && (
+        <PurchaseWorkflowModal poNumber={workflowPoNumber} onClose={() => setWorkflowPoNumber(null)} />
       )}
     </div>
   );

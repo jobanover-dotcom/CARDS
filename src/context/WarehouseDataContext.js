@@ -1,6 +1,7 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, updatePOMonitoring as updatePOMonitoringServer, updatePO as updatePOServer } from '../../actions/pos';
+import { confirmReceiving as confirmReceivingServer } from '../../actions/deliveries';
 import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
@@ -40,12 +41,19 @@ export function WarehouseDataProvider({ children }) {
     setRequestVersion((v) => v + 1);
   }, []);
 
+  const confirmReceiving = useCallback(async (input) => {
+    const delivery = await confirmReceivingServer(input);
+    setPoVersion((v) => v + 1);
+    await refreshStats();
+    return delivery;
+  }, [refreshStats]);
+
   return <WarehouseDataContext.Provider value={{
     stats, loading, poVersion, requestVersion,
     completedCount: stats.completedPOs,
     activeCount: (stats.incompletePOs || 0) - (stats.partiallyReceivedCount || 0),
     partiallyReceivedCount: stats.partiallyReceivedCount || 0,
-    refreshStats, updatePO, updatePOMonitoring, createRequest,
+    refreshStats, updatePO, updatePOMonitoring, createRequest, confirmReceiving,
   }}>{children}</WarehouseDataContext.Provider>;
 }
 

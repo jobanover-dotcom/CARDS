@@ -18,6 +18,7 @@ function HistoryView() {
   const [selectedStatus, setSelectedStatus] = useState('');
   const [appliedFilters, setAppliedFilters] = useState({
     completed: false, incomplete: false, activeDelivery: false, inProcess: false,
+    awaitingPurchase: false, purchaseConfirmed: false, readyForDelivery: false,
     approved: false, pending: false, rejected: false,
   });
   const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
@@ -34,6 +35,7 @@ function HistoryView() {
 
   const poQueryParams = useMemo(() => ({
     status: appliedFilters.completed ? 'completed' : appliedFilters.incomplete ? 'incomplete' : undefined,
+    statusIn: appliedFilters.awaitingPurchase ? ['awaiting_purchase'] : appliedFilters.purchaseConfirmed ? ['purchase_confirmed'] : appliedFilters.readyForDelivery ? ['ready_for_delivery'] : undefined,
     poType: appliedFilters.activeDelivery ? 'active-delivery' : undefined,
     inProcess: appliedFilters.inProcess || undefined,
     search: historySearchQuery || undefined,
@@ -138,7 +140,7 @@ function HistoryView() {
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedStatus(val);
-                  const reset = { completed: false, incomplete: false, activeDelivery: false, inProcess: false, approved: false, pending: false, rejected: false };
+                  const reset = { completed: false, incomplete: false, activeDelivery: false, inProcess: false, awaitingPurchase: false, purchaseConfirmed: false, readyForDelivery: false, approved: false, pending: false, rejected: false };
                   if (val) reset[val] = true;
                   setAppliedFilters(reset);
                 }}
@@ -151,6 +153,9 @@ function HistoryView() {
                     <option value="incomplete">Incomplete</option>
                     <option value="activeDelivery">Active Delivery</option>
                     <option value="inProcess">In Process</option>
+                    <option value="awaitingPurchase">Awaiting Purchase</option>
+                    <option value="purchaseConfirmed">Purchase Confirmed</option>
+                    <option value="readyForDelivery">Ready for Delivery</option>
                   </>
                 )}
                 {historyTab === 'warehouse-requests' && (
@@ -197,7 +202,7 @@ function HistoryView() {
                         <td className="p-4 text-[#333] font-medium">{order.poExpDate || '-'}</td>
                         <td className="p-4 text-[#333] font-medium">{order.pickupBy || '-'}</td>
                         <td className="p-4">
-                          <StatusBadge status={order.status === 'completed' ? 'Completed' : 'Open'} />
+                          <StatusBadge status={order.statusLabel || order.status} />
                         </td>
                       </tr>
                       );

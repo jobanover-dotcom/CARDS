@@ -49,6 +49,11 @@ model PurchaseOrder {
   profile Profile? @relation(fields: [profileId], references: [id])
   items PurchaseOrderItem[]
   monitoringItems PurchaseOrderMonitoringItem[]
+  deliveries Delivery[]
+  // V1 procurement workflow (status is canonical; poType is category only)
+  purchaseConfirmedAt DateTime?
+  purchaseConfirmedBy String?
+  readyForDeliveryAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -60,8 +65,11 @@ model PurchaseOrderItem {
   itemDescription String
   qty Int
   unit String
+  // Actually purchased quantity (never overwrites qty); null until confirmPurchase
+  purchasedQty Int?
   createdAt DateTime @default(now())
   monitoringItems PurchaseOrderMonitoringItem[]
+  deliveryItems DeliveryItem[]
   @@index([poNumber])
 }
 
@@ -132,4 +140,72 @@ model ArchiveActivityLog {
   detail String?
   actor String?
   createdAt DateTime @default(now())
+}
+
+// V1 procurement → delivery → receiving (one PO → many deliveries).
+// Supplier stays outside the system; DeliveryReceipt stores Storage paths only.
+model Delivery {
+  id String @id @default(uuid())
+  deliveryNumber String @unique
+  poNumber String
+  po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
+  reqNumber String?
+  supplier String
+  // for_delivery | in_transit | received | partially_received | discrepancy | completed
+  status String @default("for_delivery")
+  statusLabel String @default("For Delivery")
+  deliveredBy String?
+  plateNumber String?
+  deliveryDate DateTime?
+  supplierDrNumber String?
+  receivedBy String?
+  receivedAt DateTime?
+  remarks String?
+  items DeliveryItem[]
+  receipts DeliveryReceipt[]
+  auditLogs DeliveryAuditLog[]
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([poNumber])
+}
+
+model DeliveryItem {
+  id String @id @default(uuid())
+  deliveryId String
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  poItemId String
+  poItem PurchaseOrderItem @relation(fields: [poItemId], references: [id], onDelete: Cascade)
+  // Snapshot of POItem.purchasedQty at delivery creation; never overwritten later
+  purchasedQty Int
+  deliveredQty Int
+  receivedQty Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([deliveryId])
+  @@index([poItemId])
+}
+
+model DeliveryReceipt {
+  id String @id @default(uuid())
+  deliveryId String
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  // Private Supabase Storage path, e.g. DEL-2026-0018/<uuid>-supplier-dr.jpg
+  storagePath String
+  uploadedBy String?
+  uploadedAt DateTime @default(now())
+  @@index([deliveryId])
+}
+
+model DeliveryAuditLog {
+  id String @id @default(uuid())
+  deliveryId String?
+  delivery Delivery? @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  poNumber String
+  action String
+  detail String?
+  actor String?
+  createdAt DateTime @default(now())
+  @@index([poNumber])
+  @@index([deliveryId])
 }

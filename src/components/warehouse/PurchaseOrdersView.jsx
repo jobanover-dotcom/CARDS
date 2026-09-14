@@ -5,13 +5,25 @@ import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import MonitoringDetailsForm from './MonitoringDetailsForm';
+import ReceiveDeliveryForm from './ReceiveDeliveryForm';
 import CreateRequestModal from './CreateRequestModal';
+import StatusBadge from '../ui/StatusBadge';
 import PageSkeleton from '../ui/PageSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useWarehouseData } from '../../context/WarehouseDataContext';
 import { getPOs } from '../../../actions/pos';
+import { getDeliveries } from '../../../actions/deliveries';
 import { getFollowUpMap } from '../../../actions/requests';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
+
+const OPEN_DELIVERY_STATUSES = ['for_delivery', 'in_transit', 'partially_received'];
+
+// Legacy single-shot receiving applies only to old records that never entered
+// the V1 procurement workflow. New procurement states are read-only here;
+// warehouse acts on deliveries instead.
+function isLegacyReceivable(order) {
+  return order.status === 'incomplete' && order.poType === 'active-delivery';
+}
 
 function PurchaseOrdersView() {
   const { completedCount, activeCount, partiallyReceivedCount, poVersion } = useWarehouseData();
@@ -22,6 +34,10 @@ function PurchaseOrdersView() {
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [showMonitoringModal, setShowMonitoringModal] = useState(false);
   const [selectedMonitoringPo, setSelectedMonitoringPo] = useState(null);
+  const [receiveDeliveryNumber, setReceiveDeliveryNumber] = useState(null);
+  const [openDeliveryCount, setOpenDeliveryCount] = useState(0);
+
+  const isDeliveries = selectedPoType === 'deliveries';
   const [followUpPoModal, setFollowUpPoModal] = useState(false);
   const [poForFollowUp, setPoForFollowUp] = useState(null);
   const [followUpMap, setFollowUpMap] = useState({});
@@ -31,17 +47,32 @@ function PurchaseOrdersView() {
     return () => clearTimeout(t);
   }, [poSearchInput]);
 
-  const queryParams = useMemo(() => ({
-    ...(selectedPoType === 'completed'
-      ? { status: 'completed' }
-      : selectedPoType === 'partially-received'
-        ? { status: 'incomplete', poType: 'partially-received' }
-        : { status: 'incomplete', poTypeIn: ['active-delivery', 'discrepancy'] }),
-    search: poSearchQuery || undefined,
-  }), [selectedPoType, poSearchQuery]);
+  const queryParams = useMemo(() => {
+    if (isDeliveries) return { statusIn: OPEN_DELIVERY_STATUSES };
+    return {
+      ...(selectedPoType === 'completed'
+        ? { status: 'completed' }
+        : selectedPoType === 'partially-received'
+          ? { status: 'incomplete', poType: 'partially-received' }
+          : { status: 'incomplete', poTypeIn: ['active-delivery', 'discrepancy'] }),
+      search: poSearchQuery || undefined,
+    };
+  }, [selectedPoType, poSearchQuery, isDeliveries]);
 
-  const { rows: purchaseOrders, total, initialLoading, loadingMore, hasMore, loadMore } =
-    useInfiniteRows(getPOs, queryParams, poVersion);
+  const fetcher = useMemo(() => (isDeliveries ? getDeliveries : getPOs), [isDeliveries]);
+
+  const { rows, total, initialLoading, loadingMore, hasMore, loadMore } =
+    useInfiniteRows(fetcher, queryParams, poVersion);
+  const purchaseOrders = isDeliveries ? [] : rows;
+  const deliveries = isDeliveries ? rows : [];
+
+  useEffect(() => {
+    let cancelled = false;
+    getDeliveries({ statusIn: OPEN_DELIVERY_STATUSES, limit: 1 })
+      .then((res) => { if (!cancelled) setOpenDeliveryCount(res.total); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [poVersion]);
 
   useEffect(() => {
     if (purchaseOrders.length === 0) return;
@@ -90,6 +121,17 @@ function PurchaseOrdersView() {
       <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
         <div
           className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
+            selectedPoType === 'deliveries'
+              ? 'bg-gradient-to-br from-[#e0f2f1] to-[#b2dfdb] border-2 border-[#006680] shadow-[0_4px_16px_rgba(0,102,128,0.15)] scale-[1.02] -translate-y-1'
+              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#006680]'
+          }`}
+          onClick={() => setSelectedPoType('deliveries')}
+        >
+          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Open Deliveries</h3>
+          <div className="text-5xl font-bold text-[#006680]">{openDeliveryCount}</div>
+        </div>
+        <div
+          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
             selectedPoType === 'completed'
               ? 'bg-gradient-to-br from-[#e3f2fd] to-[#bbdefb] border-2 border-[#1e3c72] shadow-[0_4px_16px_rgba(30,60,114,0.15)] scale-[1.02] -translate-y-1'
               : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#1e3c72]'
@@ -126,19 +168,72 @@ function PurchaseOrdersView() {
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedPoType === 'completed' ? 'Completed' : selectedPoType === 'partially-received' ? 'Partially Received' : 'Active Delivery'}
+            {selectedPoType === 'completed' ? 'Completed' : selectedPoType === 'partially-received' ? 'Partially Received' : selectedPoType === 'deliveries' ? 'Open Deliveries' : 'Active Delivery'}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedPoType === 'completed' ? 'Successful Deliveries' : selectedPoType === 'partially-received' ? 'Short deliveries ready for follow-up' : 'Deliveries in process'}
+            {selectedPoType === 'completed' ? 'Successful Deliveries' : selectedPoType === 'partially-received' ? 'Short deliveries ready for follow-up' : selectedPoType === 'deliveries' ? 'Shipments awaiting warehouse receiving — click a row to receive' : 'Deliveries in process'}
           </p>
         </div>
 
         <SearchInput
-          placeholder="Search PO number..."
+          placeholder={isDeliveries ? 'Deliveries are listed newest first' : 'Search PO number...'}
           value={poSearchInput}
           onChange={(e) => setPoSearchInput(e.target.value)}
+          disabled={isDeliveries}
         />
 
+        {isDeliveries ? (
+        <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
+          <div className="overflow-x-auto max-h-[500px]">
+            <table className="w-full border-collapse text-[13px]">
+              <thead className="bg-[#e0f2f1] sticky top-0 z-10">
+                <tr>
+                  {['Delivery No.', 'PO No.', 'Supplier', 'Supplier DR', 'Status', 'Items', 'Delivered', 'Received'].map((h, i) => (
+                    <th key={i} className="p-4 text-left font-bold text-[#006680] border-b border-[#006680]/20 whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {deliveries.length > 0 ? (
+                  <>
+                    {deliveries.map((d, index) => {
+                      const items = d.items || [];
+                      const itemSummary = items.length ? `${items[0].poItem?.itemDescription || '—'}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
+                      const delivered = items.reduce((s, it) => s + it.deliveredQty, 0);
+                      const received = items.reduce((s, it) => s + it.receivedQty, 0);
+                      return (
+                      <tr key={d.id || index}
+                        onClick={() => setReceiveDeliveryNumber(d.deliveryNumber)}
+                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer hover:bg-[#e0f2f1]/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">
+                          <a
+                            href={`/warehouse/deliveries/${d.deliveryNumber}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-[#006680] font-semibold"
+                          >
+                            {d.deliveryNumber}
+                          </a>
+                        </td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{d.poNumber}</td>
+                        <td className="p-4 text-[#333] font-medium">{d.supplier}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{d.supplierDrNumber || '—'}</td>
+                        <td className="p-4 whitespace-nowrap"><StatusBadge status={d.statusLabel || d.status} /></td>
+                        <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{delivered}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{received}</td>
+                      </tr>
+                      );
+                    })}
+                    <TableScrollSentinel colSpan={8} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                  </>
+                ) : (
+                  <EmptyState colSpan={8} message="No open deliveries" />
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        ) : (
         <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-[13px]">
@@ -163,7 +258,8 @@ function PurchaseOrdersView() {
                       return (
                       <tr key={index}
                         onClick={() => {
-                          if (order.status === 'incomplete' && order.poType === 'active-delivery') {
+                          // Phase 14: legacy receiving only for old records outside the V1 workflow.
+                          if (isLegacyReceivable(order)) {
                             handleOpenMonitoring(order);
                           } else {
                             handleOpenReceipt(order);
@@ -217,8 +313,16 @@ function PurchaseOrdersView() {
             </table>
           </div>
         </div>
-        <p className="mt-2 text-right text-xs text-[#999]">Loaded {purchaseOrders.length} of {total} purchase orders</p>
+        )}
+        <p className="mt-2 text-right text-xs text-[#999]">Loaded {isDeliveries ? deliveries.length : purchaseOrders.length} of {total} {isDeliveries ? 'deliveries' : 'purchase orders'}</p>
       </div>
+
+      {receiveDeliveryNumber && (
+        <ReceiveDeliveryForm
+          deliveryNumber={receiveDeliveryNumber}
+          onClose={() => setReceiveDeliveryNumber(null)}
+        />
+      )}
 
       {showReceiptModal && selectedReceiptPo && (
         <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />

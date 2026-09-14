@@ -3,13 +3,15 @@
 import { prisma } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
+import { PO_STATUS, poStatusLabel } from '@/src/lib/deliveryStatus';
+import { isV1WorkflowPO } from '@/src/lib/poMigration';
 
-export interface POQuery { offset?: number; limit?: number; status?: string; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; inProcess?: boolean; }
+export interface POQuery { offset?: number; limit?: number; status?: string; statusIn?: string[]; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; inProcess?: boolean; }
 
 function buildPOWhere(user: { role: string; warehouse: string } | null, params: POQuery = {}) {
   const scoped = user?.role === 'Warehouse'; const where: Record<string, unknown> = {};
   if (scoped) where.warehouse = user.warehouse; else if (params.warehouse) where.warehouse = params.warehouse;
-  if (params.status) where.status = params.status; if (params.poType) where.poType = params.poType; if (params.poTypeIn) where.poType = { in: params.poTypeIn };
+  if (params.status) where.status = params.status; if (params.statusIn) where.status = { in: params.statusIn }; if (params.poType) where.poType = params.poType; if (params.poTypeIn) where.poType = { in: params.poTypeIn };
   if (params.inProcess) where.AND = [{ status: 'incomplete' }, { poType: 'active-delivery' }];
   if (params.search) where.OR = [{ poNumber: { contains: params.search, mode: 'insensitive' } }, { items: { some: { itemDescription: { contains: params.search, mode: 'insensitive' } } } }];
   return where;
@@ -35,7 +37,7 @@ export async function getMyPOCount() { const user = await getCurrentUser(); if (
 
 export interface POItemInput { itemDescription: string; qty: number; unit: string; }
 type CreatePOData = { date: string; poNumber: string; items: POItemInput[]; supplier: string; supplierAddress?: string; requisitioner: string; mrsNo: string; poExpDate?: string; poRvdDate?: string; pickupBy?: string; plateNumber?: string; approvedBy?: string; listedBy?: string; notes?: string; warehouse: string; profileId?: string; };
-function withPoDefaults(data: CreatePOData) { const { items, ...rest } = data; return { ...rest, status: 'incomplete', poType: 'active-delivery', statusLabel: 'Open' }; }
+function withPoDefaults(data: CreatePOData) { const { items, ...rest } = data; return { ...rest, status: PO_STATUS.AWAITING_PURCHASE.value, poType: 'active-delivery', statusLabel: poStatusLabel(PO_STATUS.AWAITING_PURCHASE.value) }; }
 async function assertCanManagePOs() { const user = await getCurrentUser(); if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) throw new Error('Unauthorized: only purchasers and superadmins can create purchase orders'); return user; }
 function validateItems(items: POItemInput[]) { if (!Array.isArray(items) || !items.length) throw new Error('At least one item is required'); for (const item of items) { if (!item.itemDescription?.trim()) throw new Error('Every item needs a description'); if (!Number.isInteger(item.qty) || item.qty < 1) throw new Error('Every item quantity must be a positive whole number'); } }
 function validateApprovedPOItems(requestItems: { itemDescription: string; qty: number; approvedQty: number | null; unit: string }[], poItems: POItemInput[]) { const requested = new Map(requestItems.map((i) => [i.itemDescription.trim().toLowerCase(), i])); for (const item of poItems) { const source = requested.get(item.itemDescription.trim().toLowerCase()); if (!source) throw new Error(`PO item "${item.itemDescription}" is not part of the source request`); const max = source.approvedQty ?? source.qty; if (item.qty > max) throw new Error(`PO quantity for "${item.itemDescription}" cannot exceed the approved quantity of ${max} ${source.unit}`); } }
@@ -58,11 +60,20 @@ export async function createPOWithApproval(data: CreatePOData, source: { reqNumb
 }
 
 export interface MonitoringUpdate { items: { poItemId: string; qtyReceived: number }[]; deliveredBy: string; plateNumber: string; dateDelivered: string; referenceNo: string; drDate: string; remarks?: string; markAsDiscrepancy?: boolean; }
+// V1 guard: the legacy single-shot paths must never touch a PO that entered
+// the procurement → delivery → receiving workflow. Such POs are owned by
+// actions/deliveries.ts; legacy writes would bypass quantities, statuses,
+// and delivery history.
+function assertLegacyPO(po: { status: string; items: { purchasedQty: number | null }[] } & { _count?: { deliveries: number } }) {
+  if (isV1WorkflowPO(po)) throw new Error('This purchase order uses the delivery workflow and cannot be updated through the legacy path');
+}
+/** @deprecated Legacy single-shot receiving for pre-V1 records only. New workflow: actions/deliveries.ts (confirmPurchase → markReadyForDelivery → proceedToDelivery → confirmReceiving). */
 export async function updatePOMonitoring(poNumber: string, monitoring: MonitoringUpdate) {
   const user = await getCurrentUser(); if (!user || user.role !== 'Warehouse') throw new Error('Unauthorized: only warehouse users can record delivery monitoring');
   if (!monitoring.deliveredBy?.trim()) throw new Error('Delivered By is required'); if (!monitoring.plateNumber?.trim()) throw new Error('Plate Number is required'); if (!monitoring.dateDelivered) throw new Error('Date delivered is required'); if (!monitoring.referenceNo?.trim()) throw new Error('Reference No. is required'); if (!monitoring.drDate) throw new Error('DR date is required');
   return prisma.$transaction(async (tx) => {
-    const po = await tx.purchaseOrder.findUnique({ where: { poNumber }, include: { items: true } }); if (!po) throw new Error('Purchase order not found'); if (po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+    const po = await tx.purchaseOrder.findUnique({ where: { poNumber }, include: { items: true, _count: { select: { deliveries: true } } } }); if (!po) throw new Error('Purchase order not found'); if (po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+    assertLegacyPO(po);
     if (!Array.isArray(monitoring.items) || monitoring.items.length !== po.items.length) throw new Error('Every PO item must have a received quantity');
     const inputMap = new Map(monitoring.items.map((i) => [i.poItemId, i.qtyReceived])); let totalOrdered = 0; let totalReceived = 0; let anyShortfall = false;
     for (const item of po.items) { const raw = inputMap.get(item.id); if (!Number.isInteger(raw) || raw < 0) throw new Error(`Received quantity for "${item.itemDescription}" must be a whole number of 0 or more`); if (raw > item.qty) throw new Error(`Received quantity for "${item.itemDescription}" cannot exceed ${item.qty} ${item.unit}`); totalOrdered += item.qty; totalReceived += raw; if (raw < item.qty) anyShortfall = true; await tx.purchaseOrderMonitoringItem.upsert({ where: { poItemId: item.id }, create: { poNumber, poItemId: item.id, qtyReceived: raw }, update: { qtyReceived: raw } }); }
@@ -74,6 +85,22 @@ export async function updatePOMonitoring(poNumber: string, monitoring: Monitorin
 
 export async function updatePO(poNumber: string, data: Partial<{ status: string; poType: string; statusLabel: string; items: POItemInput[]; pickupBy: string; poExpDate: string; supplierAddress: string; notes: string; monQtyRvd: string; monDeliveredBy: string; monPlateNumber: string; monDateDelivered: string; monReferenceNo: string; monDrDate: string; monRemarks: string; }>) {
   const user = await getCurrentUser(); if (!user) throw new Error('Unauthorized'); const { items, ...rest } = data;
+  // Hardened generic patch: status/poType/statusLabel and item replacement
+  // are legacy-only capabilities. On V1-workflow POs they would bypass the
+  // procurement → delivery → receiving chain (and item replacement would
+  // cascade-delete DeliveryItem history), so they are rejected here.
+  const touchesWorkflow = data.status !== undefined || data.poType !== undefined || data.statusLabel !== undefined || items !== undefined;
+  if (touchesWorkflow) {
+    const po = await prisma.purchaseOrder.findUnique({ where: { poNumber }, include: { items: { select: { purchasedQty: true } }, _count: { select: { deliveries: true } } } });
+    if (!po) throw new Error('Purchase order not found');
+    if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+    try {
+      assertLegacyPO({ status: po.status, items: po.items, _count: po._count });
+    } catch {
+      throw new Error('This purchase order uses the delivery workflow; update it through confirmPurchase / proceedToDelivery / confirmReceiving instead');
+    }
+    if (items !== undefined && po._count.deliveries > 0) throw new Error('PO items cannot be replaced once deliveries exist');
+  }
   if (items) return prisma.$transaction(async (tx) => { const existing = await tx.purchaseOrder.findUnique({ where: { poNumber }, include: { items: true } }); if (!existing) throw new Error('Purchase order not found'); await tx.purchaseOrderItem.deleteMany({ where: { poNumber } }); const newItems = await Promise.all(items.map((i) => { validateItems([i]); return tx.purchaseOrderItem.create({ data: { poNumber, itemDescription: i.itemDescription, qty: i.qty, unit: i.unit } }); })); await tx.purchaseOrder.update({ where: { poNumber }, data: rest }); await ensureMonitoringRows(tx, poNumber, newItems); return tx.purchaseOrder.findUnique({ where: { poNumber }, include: poInclude }); });
   return prisma.purchaseOrder.update({ where: { poNumber }, data: rest, include: poInclude });
 }

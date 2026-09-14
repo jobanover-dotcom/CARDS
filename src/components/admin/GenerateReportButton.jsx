@@ -22,7 +22,7 @@ async function downloadWorkbook(wb, filename) {
   URL.revokeObjectURL(url);
 }
 
-async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeActiveDelivery = false) {
+async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, includeActiveDelivery = false, deliveries = []) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('Purchase Order Report');
 
@@ -87,15 +87,8 @@ async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, incl
     ];
     let rowData = [...poRow, ...monRow];
     if (includeActiveDelivery) {
-      let status = '';
-      if (order.status === 'completed') {
-        status = 'Completed';
-      } else if (order.poType === 'active-delivery') {
-        status = 'Active Delivery';
-      } else {
-        status = 'Incomplete';
-      }
-      rowData.push(status);
+      // Centralized display label; falls back to the stored status value.
+      rowData.push(order.statusLabel || order.status);
     }
     wsData.push(rowData);
   });
@@ -156,10 +149,46 @@ async function generateExcel(orders, totalPOs, completedPOs, incompletePOs, incl
 
   const now = new Date();
   const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+  if (deliveries && deliveries.length) addDeliveriesSheet(wb, deliveries);
   await downloadWorkbook(wb, `Purchase_Order_Report_${ts}.xlsx`);
 }
 
-function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
+function addDeliveriesSheet(wb, deliveries) {
+  const ws = wb.addWorksheet('Deliveries');
+  const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } };
+  const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF006680' } };
+  const headerStyle = { font: headerFont, fill: headerFill, alignment: { horizontal: 'center', wrapText: true } };
+  const cellStyle = { alignment: { horizontal: 'left', wrapText: true } };
+  const headers = ['Delivery No.', 'PO No.', 'Supplier', 'Supplier DR', 'Status', 'Item Description', 'Purchased', 'Delivered', 'Received', 'Difference'];
+  ws.addRow(headers);
+  ws.getRow(1).eachCell((cell) => Object.assign(cell, headerStyle));
+  for (const d of deliveries || []) {
+    for (const item of d.items || []) {
+      ws.addRow([
+        d.deliveryNumber,
+        d.poNumber,
+        d.supplier,
+        d.supplierDrNumber || '',
+        d.statusLabel || d.status,
+        item.poItem ? item.poItem.itemDescription : '',
+        item.purchasedQty,
+        item.deliveredQty,
+        item.receivedQty,
+        item.receivedQty - item.deliveredQty,
+      ]);
+    }
+  }
+  ws.columns = [
+    { width: 16 }, { width: 14 }, { width: 18 }, { width: 14 }, { width: 18 },
+    { width: 26 }, { width: 11 }, { width: 11 }, { width: 11 }, { width: 11 },
+  ];
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    row.eachCell((cell) => Object.assign(cell, cellStyle));
+  });
+}
+
+function GenerateReportButton({ fetchReportData, showActiveDeliveryOption, fetchDeliveryReportData }) {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [includeActiveDelivery, setIncludeActiveDelivery] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -178,8 +207,10 @@ function GenerateReportButton({ fetchReportData, showActiveDeliveryOption }) {
         : allMatching;
       const finalTotal = finalOrders.length;
       const finalCompleted = finalOrders.filter(o => o.status === 'completed').length;
-      const finalIncomplete = finalOrders.filter(o => o.status === 'incomplete').length;
-      await generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete, includeActiveDelivery);
+      // Incomplete = everything not completed, so V1 procurement states count correctly.
+      const finalIncomplete = finalTotal - finalCompleted;
+      const deliveries = fetchDeliveryReportData ? await fetchDeliveryReportData() : [];
+      await generateExcel(finalOrders, finalTotal, finalCompleted, finalIncomplete, includeActiveDelivery, deliveries);
       setShowConfirmModal(false);
     } catch (e) {
       alert('Failed to generate report: ' + e.message);

@@ -1,6 +1,7 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
+import { confirmPurchase as confirmPurchaseServer, markReadyForDelivery as markReadyForDeliveryServer, proceedToDelivery as proceedToDeliveryServer } from '../../actions/deliveries';
 import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
@@ -112,6 +113,27 @@ export function AdminDataProvider({ children }) {
     setPoVersion(v => v + 1);
   }, []);
 
+  const confirmPurchase = useCallback(async (input) => {
+    const po = await confirmPurchaseServer(input);
+    setPoVersion(v => v + 1);
+    await refreshStats();
+    return po;
+  }, [refreshStats]);
+
+  const markReadyForDelivery = useCallback(async (poNumber) => {
+    const po = await markReadyForDeliveryServer({ poNumber });
+    setPoVersion(v => v + 1);
+    await refreshStats();
+    return po;
+  }, [refreshStats]);
+
+  const proceedToDelivery = useCallback(async (input) => {
+    const delivery = await proceedToDeliveryServer(input);
+    setPoVersion(v => v + 1);
+    await refreshStats();
+    return delivery;
+  }, [refreshStats]);
+
   return (
     <AdminDataContext.Provider value={{
       warehouses,
@@ -123,6 +145,7 @@ export function AdminDataProvider({ children }) {
       userVersion,
       refreshStats,
       createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
+      confirmPurchase, markReadyForDelivery, proceedToDelivery,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
       addWarehouse: handleAddWarehouse,

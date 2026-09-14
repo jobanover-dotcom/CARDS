@@ -11,6 +11,7 @@ import PageSkeleton from '../ui/PageSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
 import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
+import { getDeliveryReportData } from '../../../actions/deliveries';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 function DashboardView() {
@@ -59,6 +60,7 @@ function DashboardView() {
   };
 
   const fetchReportData = () => getReportData(queryParams);
+  const fetchDeliveryReportData = () => getDeliveryReportData({ warehouse: selectedWarehouse || undefined });
 
   if (initialLoading) {
     return (
@@ -122,7 +124,7 @@ function DashboardView() {
             value={dashboardSearchInput}
             onChange={(e) => setDashboardSearchInput(e.target.value)}
           />
-          <GenerateReportButton fetchReportData={fetchReportData} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} />
+          <GenerateReportButton fetchReportData={fetchReportData} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} fetchDeliveryReportData={fetchDeliveryReportData} />
         </div>
         <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
