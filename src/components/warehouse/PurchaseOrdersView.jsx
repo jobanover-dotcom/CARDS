@@ -26,7 +26,7 @@ function isLegacyReceivable(order) {
 }
 
 function PurchaseOrdersView() {
-  const { completedCount, activeCount, partiallyReceivedCount, poVersion } = useWarehouseData();
+  const { completedCount, activeCount, partiallyReceivedCount, poVersion, getWarehouseV1Partials } = useWarehouseData();
   const [selectedPoType, setSelectedPoType] = useState('completed');
   const [poSearchInput, setPoSearchInput] = useState('');
   const [poSearchQuery, setPoSearchQuery] = useState('');
@@ -36,10 +36,13 @@ function PurchaseOrdersView() {
   const [selectedMonitoringPo, setSelectedMonitoringPo] = useState(null);
   const [receiveDeliveryNumber, setReceiveDeliveryNumber] = useState(null);
   const [openDeliveryCount, setOpenDeliveryCount] = useState(0);
+  const [v1Partials, setV1Partials] = useState([]);
+  const [v1PartialsError, setV1PartialsError] = useState(null);
 
   const isDeliveries = selectedPoType === 'deliveries';
   const [followUpPoModal, setFollowUpPoModal] = useState(false);
   const [poForFollowUp, setPoForFollowUp] = useState(null);
+  const [followUpBalance, setFollowUpBalance] = useState(null);
   const [followUpMap, setFollowUpMap] = useState({});
 
   useEffect(() => {
@@ -75,13 +78,24 @@ function PurchaseOrdersView() {
   }, [poVersion]);
 
   useEffect(() => {
-    if (purchaseOrders.length === 0) return;
+    if (selectedPoType !== 'partially-received') return;
     let cancelled = false;
-    getFollowUpMap(purchaseOrders.map((o) => o.poNumber), 'po')
+    // Server-computed V1 balances only — the UI never derives these itself.
+    getWarehouseV1Partials()
+      .then((rows) => { if (!cancelled) { setV1Partials(rows); setV1PartialsError(null); } })
+      .catch((e) => { if (!cancelled) setV1PartialsError(e?.message || 'Failed to load delivery shortfalls'); });
+    return () => { cancelled = true; };
+  }, [selectedPoType, poVersion, getWarehouseV1Partials]);
+
+  useEffect(() => {
+    const numbers = [...purchaseOrders.map((o) => o.poNumber), ...v1Partials.map((p) => p.poNumber)];
+    if (numbers.length === 0) return;
+    let cancelled = false;
+    getFollowUpMap(numbers, 'po')
       .then((map) => { if (!cancelled) setFollowUpMap(map); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [purchaseOrders, poVersion]);
+  }, [purchaseOrders, v1Partials, poVersion]);
 
   const handleOpenReceipt = (po) => {
     setSelectedReceiptPo(po);
@@ -234,6 +248,70 @@ function PurchaseOrdersView() {
           </div>
         </div>
         ) : (
+        <>
+        {selectedPoType === 'partially-received' && (
+        <div className="mt-4 border border-[#ffcc80] rounded-lg overflow-hidden mb-4">
+          <div className="bg-[#fff8e1] px-4 py-2 text-[12px] font-bold text-[#8d6e00]">Delivery shortfalls — quantities from delivery records (Requested → Approved → Purchased → Delivered → Received)</div>
+          <div className="overflow-x-auto max-h-[500px]">
+            <table className="w-full border-collapse text-[13px]">
+              <thead className="bg-[#fff3e0] sticky top-0 z-10">
+                <tr>
+                  {['PO number', 'Item', 'Requested', 'Approved', 'Purchased', 'Delivered', 'Received', 'Outstanding', 'Action'].map((h, i) => (
+                    <th key={i} className="p-4 text-left font-bold text-[#ef6c00] border-b border-[#ef6c00]/20 whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {v1PartialsError ? (
+                  <tr><td colSpan={9} className="p-4 text-[#c62828] text-xs font-semibold">{v1PartialsError}</td></tr>
+                ) : v1Partials.length === 0 ? (
+                  <EmptyState colSpan={9} message="No V1 delivery shortfalls" />
+                ) : (
+                  v1Partials.map((p) => {
+                    const followUps = followUpMap[p.poNumber] || [];
+                    const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
+                    const rows = p.items.filter((it) => it.requestOutstanding > 0);
+                    return rows.map((it, idx) => (
+                      <tr key={`${p.poNumber}-${it.poItemId}`} className={`border-b border-gray-200 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
+                        {idx === 0 && (
+                          <td rowSpan={rows.length} className="p-4 text-[#333] font-bold whitespace-nowrap align-top">{p.poNumber}<div className="text-[10px] font-normal text-[#999]">{p.supplier}</div></td>
+                        )}
+                        <td className="p-4 text-[#333] font-medium">{it.itemDescription}<div className="text-[10px] text-[#999]">shortfall: {it.shortfallSource}</div></td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.requestedQty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.approvedQty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.purchasedQty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.deliveredQty}</td>
+                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.receivedQty}</td>
+                        <td className="p-4 font-bold text-[#e65100] whitespace-nowrap">{it.requestOutstanding}</td>
+                        {idx === 0 && (
+                          <td rowSpan={rows.length} className="p-4 align-top">
+                            {!blocking ? (
+                              <button
+                                onClick={() => {
+                                  setPoForFollowUp({ poNumber: p.poNumber });
+                                  setFollowUpBalance({ poNumber: p.poNumber, items: rows.map((r) => ({ itemDescription: r.itemDescription, unit: r.unit, maxQty: r.requestOutstanding })) });
+                                  setFollowUpPoModal(true);
+                                }}
+                                className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00]"
+                              >
+                                File Follow-Up
+                              </button>
+                            ) : (
+                              <span className="inline-block px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-100 text-[#888] border border-gray-200 cursor-not-allowed">
+                                Follow-up {blocking.status === 'Pending' ? 'pending' : 'approved'}: {blocking.mrsNo}
+                              </span>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    ));
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        )}
         <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-[13px]">
@@ -313,6 +391,7 @@ function PurchaseOrdersView() {
             </table>
           </div>
         </div>
+        </>
         )}
         <p className="mt-2 text-right text-xs text-[#999]">Loaded {isDeliveries ? deliveries.length : purchaseOrders.length} of {total} {isDeliveries ? 'deliveries' : 'purchase orders'}</p>
       </div>
@@ -338,9 +417,11 @@ function PurchaseOrdersView() {
       {followUpPoModal && poForFollowUp && (
         <CreateRequestModal
           followUpPo={poForFollowUp}
+          followUpBalance={followUpBalance}
           onClose={() => {
             setFollowUpPoModal(false);
             setPoForFollowUp(null);
+            setFollowUpBalance(null);
           }}
         />
       )}

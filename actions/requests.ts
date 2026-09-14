@@ -1,7 +1,12 @@
 'use server';
 
 import { prisma } from '@/lib/prisma';
+import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
+import { buildPOChains } from './deliveries';
+import { isV1WorkflowPO } from '@/src/lib/poMigration';
+
+type Tx = Prisma.TransactionClient;
 
 export interface RequestItemInput { itemDescription: string; qty: number; unit: string; }
 export interface RequestQuery { offset?: number; limit?: number; status?: string; search?: string; }
@@ -57,44 +62,65 @@ export async function createRequest(data: {
 
   if (rest.followUpOfReqNumber && rest.followUpOfPoNumber) throw new Error('A follow-up request cannot reference both a request and a purchase order');
 
-  if (rest.followUpOfReqNumber) {
-    const source = await prisma.warehouseRequest.findUnique({ where: { reqNumber: rest.followUpOfReqNumber }, include: { items: true } });
-    if (!source) throw new Error(`Source request ${rest.followUpOfReqNumber} not found`);
-    if (user.role === 'Warehouse' && source.warehouse !== user.warehouse) throw new Error('Unauthorized');
-    const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
-    for (const sourceItem of source.items) {
-      const approved = sourceItem.approvedQty ?? 0;
-      const remaining = Math.max(0, sourceItem.qty - approved);
-      const requested = requestedByDescription.get(sourceItem.itemDescription.trim().toLowerCase()) ?? 0;
-      if (requested > remaining) throw new Error(`Follow-up qty for "${sourceItem.itemDescription}" cannot exceed the remaining balance of ${remaining} ${sourceItem.unit}`);
+  // Follow-up validation and creation run inside one transaction with row
+  // locks on the source, so two simultaneous submissions cannot both pass
+  // the duplicate/outstanding checks and create duplicate follow-ups.
+  return prisma.$transaction(async (tx) => {
+    if (rest.followUpOfReqNumber) {
+      await tx.$queryRaw`SELECT "reqNumber" FROM "WarehouseRequest" WHERE "reqNumber" = ${rest.followUpOfReqNumber} FOR UPDATE`;
+      const source = await tx.warehouseRequest.findUnique({ where: { reqNumber: rest.followUpOfReqNumber }, include: { items: true } });
+      if (!source) throw new Error(`Source request ${rest.followUpOfReqNumber} not found`);
+      if (user.role === 'Warehouse' && source.warehouse !== user.warehouse) throw new Error('Unauthorized');
+      const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
+      for (const sourceItem of source.items) {
+        const approved = sourceItem.approvedQty ?? 0;
+        const remaining = Math.max(0, sourceItem.qty - approved);
+        const requested = requestedByDescription.get(sourceItem.itemDescription.trim().toLowerCase()) ?? 0;
+        if (requested > remaining) throw new Error(`Follow-up qty for "${sourceItem.itemDescription}" cannot exceed the remaining balance of ${remaining} ${sourceItem.unit}`);
+      }
     }
-  }
 
-  if (rest.followUpOfPoNumber) {
-    const source = await prisma.purchaseOrder.findUnique({ where: { poNumber: rest.followUpOfPoNumber }, include: { items: { include: { monitoringItems: true } } } });
-    if (!source) throw new Error(`Source purchase order ${rest.followUpOfPoNumber} not found`);
-    if (user.role === 'Warehouse' && source.warehouse !== user.warehouse) throw new Error('Unauthorized');
-    const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
-    for (const sourceItem of source.items) {
-      const received = sourceItem.monitoringItems[0]?.qtyReceived ?? 0;
-      const remaining = Math.max(0, sourceItem.qty - received);
-      const requested = requestedByDescription.get(sourceItem.itemDescription.trim().toLowerCase()) ?? 0;
-      if (requested > remaining) throw new Error(`Follow-up qty for "${sourceItem.itemDescription}" cannot exceed the remaining balance of ${remaining} ${sourceItem.unit}`);
+    if (rest.followUpOfPoNumber) {
+      await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "poNumber" = ${rest.followUpOfPoNumber} FOR UPDATE`;
+      const source = await tx.purchaseOrder.findUnique({ where: { poNumber: rest.followUpOfPoNumber }, include: { items: { include: { monitoringItems: true } } } });
+      if (!source) throw new Error(`Source purchase order ${rest.followUpOfPoNumber} not found`);
+      if (user.role === 'Warehouse' && source.warehouse !== user.warehouse) throw new Error('Unauthorized');
+      const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
+      const isV1 = isV1WorkflowPO(source);
+      if (isV1) {
+        // V1 POs: balance = requestOutstanding from DeliveryItem data, never
+        // legacy monitoring quantities.
+        const { chains } = await buildPOChains(tx, rest.followUpOfPoNumber);
+        const claimed = (desc: string) => requestedByDescription.get(desc.trim().toLowerCase()) ?? 0;
+        for (const chain of chains) {
+          if (claimed(chain.itemDescription) > chain.requestOutstanding)
+            throw new Error(`Follow-up qty for "${chain.itemDescription}" cannot exceed the outstanding balance of ${chain.requestOutstanding} ${chain.unit}`);
+        }
+        if (!chains.some((c) => claimed(c.itemDescription) > 0 && claimed(c.itemDescription) <= c.requestOutstanding))
+          throw new Error('No requested item has an outstanding delivery balance');
+      } else {
+        for (const sourceItem of source.items) {
+          const received = sourceItem.monitoringItems[0]?.qtyReceived ?? 0;
+          const remaining = Math.max(0, sourceItem.qty - received);
+          const requested = requestedByDescription.get(sourceItem.itemDescription.trim().toLowerCase()) ?? 0;
+          if (requested > remaining) throw new Error(`Follow-up qty for "${sourceItem.itemDescription}" cannot exceed the remaining balance of ${remaining} ${sourceItem.unit}`);
+        }
+        if (!items.some((i) => {
+          const sourceItem = source.items.find((s) => s.itemDescription.trim().toLowerCase() === i.itemDescription.trim().toLowerCase());
+          return sourceItem && i.qty <= Math.max(0, sourceItem.qty - (sourceItem.monitoringItems[0]?.qtyReceived ?? 0));
+        })) throw new Error('No requested item has an outstanding delivery balance');
+      }
     }
-    if (!items.some((i) => {
-      const sourceItem = source.items.find((s) => s.itemDescription.trim().toLowerCase() === i.itemDescription.trim().toLowerCase());
-      return sourceItem && i.qty <= Math.max(0, sourceItem.qty - (sourceItem.monitoringItems[0]?.qtyReceived ?? 0));
-    })) throw new Error('No requested item has an outstanding delivery balance');
-  }
 
-  const sourceNumber = rest.followUpOfReqNumber ?? rest.followUpOfPoNumber;
-  if (sourceNumber) {
-    const field = rest.followUpOfReqNumber ? 'followUpOfReqNumber' : 'followUpOfPoNumber';
-    const existing = await prisma.warehouseRequest.findFirst({ where: { [field]: sourceNumber, status: { in: ['Pending', 'Approved', 'Partially Approved'] } }, select: { mrsNo: true, status: true } });
-    if (existing) throw new Error(`A follow-up (${existing.mrsNo}, ${existing.status}) already exists for this. Only a rejected follow-up can be refiled.`);
-  }
+    const sourceNumber = rest.followUpOfReqNumber ?? rest.followUpOfPoNumber;
+    if (sourceNumber) {
+      const field = rest.followUpOfReqNumber ? 'followUpOfReqNumber' : 'followUpOfPoNumber';
+      const existing = await tx.warehouseRequest.findFirst({ where: { [field]: sourceNumber, status: { in: ['Pending', 'Approved', 'Partially Approved'] } }, select: { mrsNo: true, status: true } });
+      if (existing) throw new Error(`A follow-up (${existing.mrsNo}, ${existing.status}) already exists for this. Only a rejected follow-up can be refiled.`);
+    }
 
-  return prisma.warehouseRequest.create({ data: { ...rest, warehouse: user.warehouse || null, status: 'Pending', remarks: null, items: { create: items.map((i) => ({ itemDescription: i.itemDescription.trim(), qty: i.qty, unit: i.unit })) } }, include: { items: true } });
+    return tx.warehouseRequest.create({ data: { ...rest, warehouse: user.warehouse || null, status: 'Pending', remarks: null, items: { create: items.map((i) => ({ itemDescription: i.itemDescription.trim(), qty: i.qty, unit: i.unit })) } }, include: { items: true } });
+  });
 }
 
 async function assertElevated() {

@@ -73,7 +73,7 @@ describe('quantity chain math', () => {
 })
 
 describe('delivery Zod schemas', () => {
-  it('accepts confirmPurchase with zero-qty items', () => {
+  it('accepts confirmPurchase with positive purchased qty', () => {
     expect(() =>
       confirmPurchaseSchema.parse({
         poNumber: 'PO-2026-0031',
@@ -82,9 +82,18 @@ describe('delivery Zod schemas', () => {
     ).not.toThrow()
   })
 
-  it('rejects negative purchased qty', () => {
+  it('rejects zero purchased qty', () => {
+    expect(() =>
+      confirmPurchaseSchema.parse({ poNumber: 'PO-1', items: [{ poItemId: 'i', purchasedQty: 0 }] }),
+    ).toThrow(/positive whole number/)
+  })
+
+  it('rejects negative or decimal purchased qty', () => {
     expect(() =>
       confirmPurchaseSchema.parse({ poNumber: 'PO-1', items: [{ poItemId: 'i', purchasedQty: -1 }] }),
+    ).toThrow()
+    expect(() =>
+      confirmPurchaseSchema.parse({ poNumber: 'PO-1', items: [{ poItemId: 'i', purchasedQty: 2.5 }] }),
     ).toThrow()
   })
 

@@ -52,7 +52,7 @@ export async function createPOWithApproval(data: CreatePOData, source: { reqNumb
     const approvalMap = new Map((source.itemApprovals || []).map((a) => [a.id, a.approvedQty]));
     const effective = req.items.map((item) => ({ ...item, approvedQty: Math.max(0, Math.min(approvalMap.has(item.id) ? approvalMap.get(item.id)! : (item.approvedQty ?? item.qty), item.qty)) }));
     validateApprovedPOItems(effective, data.items);
-    const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults(data), items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } });
+    const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults(data), sourceReqNumber: source.reqNumber, items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } });
     await ensureMonitoringRows(tx, po.poNumber, po.items);
     let allFull = true; for (const item of req.items) { const raw = approvalMap.has(item.id) ? approvalMap.get(item.id)! : (item.approvedQty ?? item.qty); if (!Number.isInteger(raw) || raw < 0) throw new Error(`Approved quantity for "${item.itemDescription}" must be a whole number of 0 or more`); const approvedQty = Math.min(raw, item.qty); if (approvedQty < item.qty) allFull = false; await tx.warehouseRequestItem.update({ where: { id: item.id }, data: { approvedQty } }); }
     await tx.warehouseRequest.update({ where: { reqNumber: source.reqNumber }, data: { status: allFull ? 'Approved' : 'Partially Approved' } }); return po;

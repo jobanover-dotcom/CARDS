@@ -1,7 +1,19 @@
 // Pure server-side quantity math for the V1 quantity chain:
-// POItem.qty (ordered) → POItem.purchasedQty → SUM(deliveredQty) → SUM(receivedQty).
+// Requested → Approved → Purchased → Delivered → Received → Outstanding.
 // UI may display these numbers but must never be trusted; actions recompute
 // from the database inside the transaction and reject over-claims.
+// No stage is ever overwritten by a later stage; each balance below answers
+// exactly one workflow question.
+
+export interface DeliveryQtyRow {
+  deliveredQty: number
+  receivedQty: number
+}
+
+export interface RemainingInput {
+  purchasedQty: number | null | undefined
+  deliveries: DeliveryQtyRow[]
+}
 
 export interface DeliveryQtyRow {
   deliveredQty: number
@@ -47,4 +59,95 @@ export function assertValidReceivedQty(receivedQty: number, deliveredQty: number
     throw new Error(`Received quantity for "${label}" must be a whole number of 0 or more`)
   if (receivedQty > deliveredQty)
     throw new Error(`Received quantity for "${label}" cannot exceed the delivered quantity of ${deliveredQty}`)
+}
+
+export function assertValidPurchasedQty(purchasedQty: number, maxQty: number, label: string): void {
+  if (!Number.isInteger(purchasedQty) || purchasedQty < 1)
+    throw new Error(`Purchased quantity for "${label}" must be a positive whole number`)
+  if (purchasedQty > maxQty)
+    throw new Error(
+      `Purchased quantity for "${label}" cannot exceed the approved quantity of ${maxQty}`,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Full per-item quantity hierarchy. requestedQty comes from the source
+// WarehouseRequestItem; every other stage comes from PO / Delivery records.
+// ---------------------------------------------------------------------------
+
+export interface ItemChainInput {
+  requestedQty: number | null | undefined
+  approvedQty: number | null | undefined
+  purchasedQty: number | null | undefined
+  deliveries: DeliveryQtyRow[]
+}
+
+export interface ItemChain {
+  requestedQty: number
+  approvedQty: number
+  purchasedQty: number
+  deliveredQty: number
+  receivedQty: number
+  /** requested - approved: still waiting on purchaser approval */
+  procurementRemaining: number
+  /** purchased - delivered: still deliverable through new deliveries */
+  deliveryRemaining: number
+  /** delivered - received: received short of what was shipped */
+  receivingRemaining: number
+  /** max(0, requested - received): the follow-up quantity */
+  requestOutstanding: number
+  /** max(0, requested - approved): shortfall born at approval */
+  approvalShortfall: number
+  /** max(0, approved - purchased): shortfall born at procurement */
+  procurementShortfall: number
+  /** delivered - received: shortfall born at receiving */
+  receivingShortfall: number
+}
+
+export function buildItemChain(input: ItemChainInput): ItemChain {
+  const requestedQty = Math.max(0, input.requestedQty ?? 0)
+  const approvedQty = Math.max(0, input.approvedQty ?? 0)
+  const purchasedQty = Math.max(0, input.purchasedQty ?? 0)
+  const deliveredQty = totalDelivered(input.deliveries)
+  const receivedQty = totalReceived(input.deliveries)
+  return {
+    requestedQty,
+    approvedQty,
+    purchasedQty,
+    deliveredQty,
+    receivedQty,
+    procurementRemaining: Math.max(0, requestedQty - approvedQty),
+    deliveryRemaining: Math.max(0, purchasedQty - deliveredQty),
+    receivingRemaining: Math.max(0, deliveredQty - receivedQty),
+    requestOutstanding: Math.max(0, requestedQty - receivedQty),
+    approvalShortfall: Math.max(0, requestedQty - approvedQty),
+    procurementShortfall: Math.max(0, approvedQty - purchasedQty),
+    receivingShortfall: Math.max(0, deliveredQty - receivedQty),
+  }
+}
+
+export interface POCompletionInput {
+  chains: ItemChain[]
+  hasOpenDiscrepancy: boolean
+}
+
+export interface POCompletion {
+  /** every purchased unit physically received */
+  procurementComplete: boolean
+  /** original request fully satisfied */
+  requestOutstanding: number
+  /** the ONLY condition under which a V1 PO may become completed */
+  canComplete: boolean
+}
+
+export function evaluatePOCompletion(input: POCompletionInput): POCompletion {
+  const procurementComplete =
+    input.chains.length > 0 &&
+    input.chains.every((c) => c.purchasedQty > 0 && c.receivedQty >= c.purchasedQty)
+  const requestOutstanding = input.chains.reduce((s, c) => s + c.requestOutstanding, 0)
+  return {
+    procurementComplete,
+    requestOutstanding,
+    canComplete: procurementComplete && !input.hasOpenDiscrepancy && requestOutstanding === 0,
+  }
 }

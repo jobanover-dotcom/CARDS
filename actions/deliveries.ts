@@ -6,8 +6,12 @@ import { getCurrentUser } from './auth';
 import { DELIVERY_STATUS, PO_STATUS, deliveryStatusLabel, poStatusLabel } from '@/src/lib/deliveryStatus';
 import {
   assertValidDeliveredQty,
+  assertValidPurchasedQty,
   assertValidReceivedQty,
+  buildItemChain,
+  evaluatePOCompletion,
   remainingToDeliver,
+  type ItemChain,
 } from '@/src/lib/deliveryQuantities';
 import {
   confirmPurchaseSchema,
@@ -83,6 +87,204 @@ async function assertSourceRequestApprovable(tx: Tx, mrsNo: string) {
     throw new Error(`Source request ${mrsNo} is ${req.status}; only approved requests can proceed to delivery`);
 }
 
+export interface FollowUpChainRow extends ItemChain {
+  poItemId: string
+  itemDescription: string
+  unit: string
+  /** where the outstanding balance originates: approval | procurement | receiving | none */
+  shortfallSource: 'approval' | 'procurement' | 'receiving' | 'none'
+  /** true when a follow-up request may be filed for this line */
+  followUpEligible: boolean
+}
+
+function matchRequestItem(reqItems: { itemDescription: string; qty: number; approvedQty: number | null }[], description: string) {
+  const key = description.trim().toLowerCase();
+  return reqItems.find((r) => r.itemDescription.trim().toLowerCase() === key) ?? null;
+}
+
+// Resolve the source request for request-level balances: explicit
+// sourceReqNumber first, then earliest mrsNo match. Returns null for
+// legacy/manual POs, in which case PO quantities stand in for requested.
+async function loadSourceRequest(
+  tx: Tx,
+  po: { sourceReqNumber: string | null; mrsNo: string },
+) {
+  if (po.sourceReqNumber) {
+    const direct = await tx.warehouseRequest.findUnique({
+      where: { reqNumber: po.sourceReqNumber },
+      include: { items: true },
+    });
+    if (direct) return direct;
+  }
+  return tx.warehouseRequest.findFirst({
+    where: { mrsNo: po.mrsNo },
+    orderBy: { createdAt: 'asc' },
+    include: { items: true },
+  });
+}
+
+// Authoritative per-item chain, computed from the database inside the
+// caller's transaction. Single source of truth for completion, follow-up
+// balances, and warehouse outstanding displays — never duplicated elsewhere.
+export async function buildPOChains(tx: Tx, poNumber: string): Promise<{
+  chains: FollowUpChainRow[]
+  sourceReqNumber: string | null
+}> {
+  const po = await tx.purchaseOrder.findUnique({
+    where: { poNumber },
+    include: { items: { include: { deliveryItems: true } } },
+  });
+  if (!po) throw new Error('Purchase order not found');
+  const source = await loadSourceRequest(tx, po);
+  const chains: FollowUpChainRow[] = po.items.map((item) => {
+    const matched = source ? matchRequestItem(source.items, item.itemDescription) : null;
+    const chain = buildItemChain({
+      requestedQty: matched ? matched.qty : item.qty,
+      approvedQty: matched ? (matched.approvedQty ?? matched.qty) : item.qty,
+      purchasedQty: item.purchasedQty,
+      deliveries: item.deliveryItems,
+    });
+    const shortfallSource =
+      chain.requestOutstanding === 0
+        ? 'none'
+        : chain.approvalShortfall > 0
+          ? 'approval'
+          : chain.procurementShortfall > 0
+            ? 'procurement'
+            : 'receiving';
+    return {
+      ...chain,
+      poItemId: item.id,
+      itemDescription: item.itemDescription,
+      unit: item.unit,
+      shortfallSource,
+      followUpEligible: chain.requestOutstanding > 0,
+    };
+  });
+  return { chains, sourceReqNumber: source ? source.reqNumber : null };
+}
+
+export interface POFollowUpBalance {
+  poNumber: string
+  sourceReqNumber: string | null
+  items: FollowUpChainRow[]
+  totals: {
+    requested: number
+    approved: number
+    purchased: number
+    delivered: number
+    received: number
+    outstanding: number
+  }
+  canComplete: boolean
+}
+
+// Server-side V1 follow-up balance. Feeds the warehouse follow-up UI and
+// validates follow-up quantities — the UI never computes its own balances.
+export async function getPOFollowUpBalance(poNumber: string): Promise<POFollowUpBalance> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  return prisma.$transaction(async (tx) => {
+    const po = await tx.purchaseOrder.findUnique({ where: { poNumber } });
+    if (!po) throw new Error('Purchase order not found');
+    if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+    const { chains, sourceReqNumber } = await buildPOChains(tx, poNumber);
+    const fresh = await tx.purchaseOrder.findUnique({
+      where: { poNumber },
+      select: { status: true, deliveries: { select: { status: true } } },
+    });
+    const hasOpenDiscrepancy =
+      fresh?.deliveries.some((d) => d.status === DELIVERY_STATUS.DISCREPANCY.value) ?? false;
+    const completion = evaluatePOCompletion({ chains, hasOpenDiscrepancy });
+    const sum = (f: (c: FollowUpChainRow) => number) => chains.reduce((s, c) => s + f(c), 0);
+    return {
+      poNumber,
+      sourceReqNumber,
+      items: chains,
+      totals: {
+        requested: sum((c) => c.requestedQty),
+        approved: sum((c) => c.approvedQty),
+        purchased: sum((c) => c.purchasedQty),
+        delivered: sum((c) => c.deliveredQty),
+        received: sum((c) => c.receivedQty),
+        outstanding: completion.requestOutstanding,
+      },
+      canComplete: completion.canComplete,
+    };
+  });
+}
+
+// Warehouse V1 partials: V1 POs with requestOutstanding > 0, each with its
+// full item chain. Legacy POs keep their own monitoring-based list.
+export async function getWarehouseV1Partials() {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  const scope = user.role === 'Warehouse' ? { warehouse: user.warehouse } : {};
+  const pos = await prisma.purchaseOrder.findMany({
+    where: {
+      ...scope,
+      status: {
+        in: [PO_STATUS.READY_FOR_DELIVERY.value, PO_STATUS.PURCHASE_CONFIRMED.value, PO_STATUS.COMPLETED.value],
+      },
+    },
+    select: { poNumber: true, supplier: true, mrsNo: true, status: true, statusLabel: true, warehouse: true },
+    orderBy: { updatedAt: 'desc' },
+    take: 100,
+  });
+  const result: (POFollowUpBalance & { supplier: string; mrsNo: string; status: string; statusLabel: string; warehouse: string })[] = [];
+  for (const po of pos) {
+    const hasV1 = await prisma.purchaseOrderItem.count({
+      where: { poNumber: po.poNumber, NOT: { purchasedQty: null } },
+    });
+    const deliveryCount = await prisma.delivery.count({ where: { poNumber: po.poNumber } });
+    if (hasV1 === 0 && deliveryCount === 0) continue;
+    const balance = await getPOFollowUpBalance(po.poNumber);
+    if (balance.totals.outstanding > 0) {
+      result.push({ ...balance, supplier: po.supplier, mrsNo: po.mrsNo, status: po.status, statusLabel: po.statusLabel, warehouse: po.warehouse });
+    }
+  }
+  return result;
+}
+
+// V1 warehouse statistics derived from Delivery/DeliveryItem aggregates —
+// never from poType.
+export async function getV1WarehouseStats() {
+  const user = await getCurrentUser();
+  if (!user) return { openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0 };
+  const scope = user.role === 'Warehouse' ? { po: { warehouse: user.warehouse } } : {};
+  const poScope = user.role === 'Warehouse' ? { warehouse: user.warehouse } : {};
+  const [openDeliveryCount, discrepancyDeliveryCount, readyPOCount, partialDeliveries] = await prisma.$transaction([
+    prisma.delivery.count({
+      where: {
+        ...scope,
+        status: {
+          in: [DELIVERY_STATUS.FOR_DELIVERY.value, DELIVERY_STATUS.IN_TRANSIT.value, DELIVERY_STATUS.PARTIALLY_RECEIVED.value],
+        },
+      },
+    }),
+    prisma.delivery.count({ where: { ...scope, status: DELIVERY_STATUS.DISCREPANCY.value } }),
+    prisma.purchaseOrder.count({
+      where: {
+        ...poScope,
+        status: { in: [PO_STATUS.AWAITING_PURCHASE.value, PO_STATUS.PURCHASE_CONFIRMED.value, PO_STATUS.READY_FOR_DELIVERY.value] },
+      },
+    }),
+    prisma.delivery.findMany({
+      where: {
+        ...scope,
+        status: { in: [DELIVERY_STATUS.PARTIALLY_RECEIVED.value, DELIVERY_STATUS.DISCREPANCY.value] },
+      },
+      select: { poNumber: true },
+    }),
+  ]);
+  return {
+    openDeliveryCount,
+    discrepancyDeliveryCount,
+    partialPOCount: new Set(partialDeliveries.map((d) => d.poNumber)).size,
+    readyPOCount,
+  };
+}
+
 export interface RemainingRow {
   poItemId: string;
   itemDescription: string;
@@ -138,10 +340,7 @@ export async function confirmPurchase(input: { poNumber: string; items: { poItem
     for (const item of po.items) {
       const qty = inputMap.get(item.id);
       if (qty === undefined) throw new Error(`Missing purchased quantity for "${item.itemDescription}"`);
-      if (!Number.isInteger(qty) || qty < 0)
-        throw new Error(`Purchased quantity for "${item.itemDescription}" must be a whole number of 0 or more`);
-      if (qty > item.qty)
-        throw new Error(`Purchased quantity for "${item.itemDescription}" cannot exceed the ordered quantity of ${item.qty} ${item.unit}`);
+      assertValidPurchasedQty(qty, item.qty, item.itemDescription);
       await tx.purchaseOrderItem.update({ where: { id: item.id }, data: { purchasedQty: qty } });
     }
     const updated = await tx.purchaseOrder.update({
@@ -227,6 +426,7 @@ export async function proceedToDelivery(input: {
       data: {
         deliveryNumber,
         poNumber: po.poNumber,
+        reqNumber: po.sourceReqNumber ?? null,
         supplier: po.supplier,
         status: hasTransport ? DELIVERY_STATUS.IN_TRANSIT.value : DELIVERY_STATUS.FOR_DELIVERY.value,
         statusLabel: deliveryStatusLabel(hasTransport ? DELIVERY_STATUS.IN_TRANSIT.value : DELIVERY_STATUS.FOR_DELIVERY.value),
@@ -336,23 +536,24 @@ export async function confirmReceiving(input: {
       actor: user.username,
     });
 
-    // PO completes only when every purchased unit is received with no open
-    // discrepancy on this PO's deliveries.
+    // PO completes ONLY when every purchased unit is received, no delivery
+    // is in open discrepancy, AND the original request has zero outstanding
+    // balance. A PO is never completed merely because the latest delivery
+    // matched its purchased quantity while the request still needs follow-up.
+    const { chains } = await buildPOChains(tx, delivery.poNumber);
     const fresh = await tx.purchaseOrder.findUnique({
       where: { poNumber: delivery.poNumber },
-      include: { items: { include: { deliveryItems: true } }, deliveries: { select: { status: true } } },
+      select: { status: true, deliveries: { select: { status: true } } },
     });
     if (fresh) {
-      const allReceived = fresh.items.every(
-        (i) => (i.purchasedQty ?? 0) > 0 && i.deliveryItems.reduce((s, d) => s + d.receivedQty, 0) >= (i.purchasedQty ?? 0),
-      );
       const hasOpenDiscrepancy = fresh.deliveries.some((d) => d.status === DELIVERY_STATUS.DISCREPANCY.value);
-      if (allReceived && !hasOpenDiscrepancy && fresh.status !== PO_STATUS.COMPLETED.value) {
+      const completion = evaluatePOCompletion({ chains, hasOpenDiscrepancy });
+      if (completion.canComplete && fresh.status !== PO_STATUS.COMPLETED.value) {
         await tx.purchaseOrder.update({
-          where: { poNumber: fresh.poNumber },
+          where: { poNumber: delivery.poNumber },
           data: { status: PO_STATUS.COMPLETED.value, statusLabel: poStatusLabel(PO_STATUS.COMPLETED.value) },
         });
-        await audit(tx, { poNumber: fresh.poNumber, action: 'po_completed', detail: 'All purchased quantities received', actor: user.username });
+        await audit(tx, { poNumber: delivery.poNumber, action: 'po_completed', detail: 'All purchased quantities received with zero request outstanding', actor: user.username });
       }
     }
     return updated;

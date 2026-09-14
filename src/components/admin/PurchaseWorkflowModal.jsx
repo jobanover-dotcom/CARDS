@@ -90,6 +90,11 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
     setBusy(true);
     try {
       const items = (po.items || []).map((item) => ({ poItemId: item.id, purchasedQty: Number(purchased[item.id]) }));
+      for (const item of po.items || []) {
+        const q = Number(purchased[item.id]);
+        if (!Number.isInteger(q) || q < 1) throw new Error(`Purchased quantity for "${item.itemDescription}" must be a positive whole number`);
+        if (q > item.qty) throw new Error(`Purchased quantity for "${item.itemDescription}" cannot exceed the approved quantity of ${item.qty}`);
+      }
       await confirmPurchase({ poNumber, items, remarks: remarks.trim() || undefined });
       setSuccess('Purchase confirmed.');
       setRemarks('');
@@ -186,7 +191,7 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
                   <div key={item.id} className="grid grid-cols-[1.8fr_.6fr_.9fr] gap-2 items-end border-b border-[#f1f1f1] pb-3 last:border-b-0 last:pb-0">
                     <div><label className="text-[10px] font-bold text-[#999]">MATERIAL</label><div className="text-[13px] font-medium text-[#333]">{item.itemDescription} <span className="text-[10px] text-[#888]">({item.unit})</span></div></div>
                     <div><label className="text-[10px] font-bold text-[#999]">APPROVED</label><div className="text-[13px] font-semibold">{item.qty}</div></div>
-                    <div><label className="text-[10px] font-bold text-[#444]">PURCHASED</label><input type="number" min="0" max={item.qty} step="1" value={purchased[item.id] ?? ''} onChange={(e) => clampPurchased(item, e.target.value)} className={inputClass} /></div>
+                    <div><label className="text-[10px] font-bold text-[#444]">PURCHASED</label><input type="number" min="1" max={item.qty} step="1" value={purchased[item.id] ?? ''} onChange={(e) => clampPurchased(item, e.target.value)} className={inputClass} /></div>
                   </div>
                 ))}
               </div>

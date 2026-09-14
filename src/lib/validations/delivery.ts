@@ -8,13 +8,14 @@ export const poStatusSchema = z.enum(poStatusValues)
 export const deliveryStatusSchema = z.enum(deliveryStatusValues)
 
 // Purchaser confirms what was actually purchased (per item, never overwrites qty).
+// Every line must be positively purchased: 0 < purchasedQty <= approved/ordered.
 export const confirmPurchaseSchema = z.object({
   poNumber: z.string().min(1, 'PO number is required'),
   items: z
     .array(
       z.object({
         poItemId: z.string().min(1),
-        purchasedQty: z.number().int().min(0, 'Purchased quantity must be 0 or more'),
+        purchasedQty: z.number().int().positive('Purchased quantity must be a positive whole number'),
       }),
     )
     .min(1, 'At least one item is required'),

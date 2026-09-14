@@ -13,13 +13,17 @@ function getPOBalanceItems(po) {
   }).filter((item) => item.balance > 0);
 }
 
-function CreateRequestModal({ onClose, followUp = null, followUpPo = null }) {
+function CreateRequestModal({ onClose, followUp = null, followUpPo = null, followUpBalance = null }) {
   const { createRequest } = useWarehouseData();
   const { user } = useAuth();
-  const isFollowUp = !!(followUp || followUpPo);
+  // V1 delivery POs use server-computed outstanding balances (DeliveryItem
+  // data); legacy POs keep the monitoring-based behavior. Never mixed.
+  const isV1Balance = !!followUpBalance;
+  const isFollowUp = !!(followUp || followUpPo || followUpBalance);
 
   const calculateFollowUpItems = () => {
     if (followUp) return (followUp.items || []).map((it) => ({ ...it, balance: Math.max(0, it.qty - (it.approvedQty ?? 0)), maxQty: Math.max(0, it.qty - (it.approvedQty ?? 0)) })).filter((it) => it.balance > 0);
+    if (followUpBalance) return (followUpBalance.items || []).filter((it) => it.maxQty > 0).map((it) => ({ itemDescription: it.itemDescription, unit: it.unit, balance: it.maxQty, maxQty: it.maxQty }));
     if (followUpPo) return getPOBalanceItems(followUpPo);
     return [];
   };
@@ -50,7 +54,7 @@ function CreateRequestModal({ onClose, followUp = null, followUpPo = null }) {
       items: items.map((it) => ({ itemDescription: it.itemDescription.trim(), qty: Number(it.qty), unit: it.unit })),
       mrsNo: reqMrsNo.trim(), requestedBy: reqApprovedBy.trim(), requisitioner: user?.warehouse || 'Warehouse Site',
       ...(followUp ? { followUpOfReqNumber: followUp.reqNumber } : {}),
-      ...(followUpPo ? { followUpOfPoNumber: followUpPo.poNumber } : {}),
+      ...(followUpPo ? { followUpOfPoNumber: (followUpBalance?.poNumber || followUpPo.poNumber) } : {}),
     };
     try { await createRequest(newReq); onClose(); }
     catch (err) { setSubmitError(err?.message || 'Failed to create request. Please try again.'); }
@@ -63,7 +67,8 @@ function CreateRequestModal({ onClose, followUp = null, followUpPo = null }) {
     <div className="bg-white rounded-xl w-full max-w-[560px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
       <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5"><h2 className="m-0 text-lg font-bold text-[#333]">{isFollowUp ? 'File Follow-Up Request' : 'Create Material Request'}</h2><button className="text-2xl text-[#888]" onClick={onClose}>&times;</button></div>
       {followUp && <div className="mb-5 p-3 bg-[#fff8e1] border border-[#ffcc80] rounded-md text-xs text-[#8d6e00]">Follow-up of <b>{followUp.reqNumber}</b> — only outstanding approved-request balances are available.</div>}
-      {followUpPo && <div className="mb-5 p-3 bg-[#fef5f5] border border-[#ffcdd2] rounded-md text-xs text-[#c62828]">Follow-up of <b>{followUpPo.poNumber}</b> — only undelivered material balances are available.</div>}
+      {followUpPo && !isV1Balance && <div className="mb-5 p-3 bg-[#fef5f5] border border-[#ffcdd2] rounded-md text-xs text-[#c62828]">Follow-up of <b>{followUpPo.poNumber}</b> — only undelivered material balances are available.</div>}
+      {isV1Balance && <div className="mb-5 p-3 bg-[#fff8e1] border border-[#ffcc80] rounded-md text-xs text-[#8d6e00]">V1 delivery follow-up of <b>{followUpBalance.poNumber}</b> — quantities capped at the outstanding request balance (Requested − Received).</div>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         {submitError && <div className="px-3 py-2 rounded-md text-xs font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">{submitError}</div>}
         <div className="flex gap-4"><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>Date *</label><input type="date" value={reqDate} onChange={(e) => setReqDate(e.target.value)} required className={inputClass} /></div><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>MRS No. *</label><input type="text" value={reqMrsNo} onChange={(e) => setReqMrsNo(e.target.value)} required className={inputClass} /></div></div>

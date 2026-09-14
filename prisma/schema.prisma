@@ -54,6 +54,10 @@ model PurchaseOrder {
   purchaseConfirmedAt DateTime?
   purchaseConfirmedBy String?
   readyForDeliveryAt DateTime?
+  // Link to the source WarehouseRequest (reqNumber) for request-level
+  // balances (requested vs received). Null for legacy/manual POs, which fall
+  // back to an mrsNo lookup and then to PO quantities.
+  sourceReqNumber String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
