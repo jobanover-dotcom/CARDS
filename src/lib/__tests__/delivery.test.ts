@@ -4,6 +4,7 @@ import {
   PO_STATUS,
   PO_TYPE_ACTIVE_DELIVERY,
   deliveryStatusLabel,
+  hasReceivingDiscrepancy,
   poStatusLabel,
 } from '../deliveryStatus'
 import {
@@ -48,6 +49,43 @@ describe('workflow status contract', () => {
     expect(Object.values(PO_STATUS).every((s) => s.value !== 'discrepancy')).toBe(true)
     expect(DELIVERY_STATUS.DISCREPANCY.value).toBe('discrepancy')
     expect(DELIVERY_STATUS.PARTIALLY_RECEIVED.value).toBe('partially_received')
+  })
+})
+
+describe('canonical receiving-discrepancy rule', () => {
+  it('counts a legacy-flagged PO', () => {
+    expect(hasReceivingDiscrepancy({ poType: 'discrepancy', deliveries: [] })).toBe(true)
+  })
+
+  it('counts a PO with a discrepancy delivery', () => {
+    expect(
+      hasReceivingDiscrepancy({ poType: 'active-delivery', deliveries: [{ status: 'discrepancy' }] }),
+    ).toBe(true)
+  })
+
+  it('counts a PO satisfying both arms exactly once (union semantics)', () => {
+    const po = { poType: 'discrepancy', deliveries: [{ status: 'discrepancy' }] }
+    expect(hasReceivingDiscrepancy(po)).toBe(true)
+    // Union by poNumber in getPOStats: one PO contributes one entry per arm,
+    // and the Set collapses them to a single count.
+    expect(new Set(['PO-1', 'PO-1']).size).toBe(1)
+  })
+
+  it('excludes unflagged partial shortfalls', () => {
+    expect(
+      hasReceivingDiscrepancy({ poType: 'partially-received', deliveries: [{ status: 'partially_received' }] }),
+    ).toBe(false)
+    expect(
+      hasReceivingDiscrepancy({ poType: 'active-delivery', deliveries: [{ status: 'received' }] }),
+    ).toBe(false)
+  })
+
+  it('excludes approval and procurement shortfalls and plain outstanding', () => {
+    // Shortfalls live in quantity balances, never in discrepancy flags.
+    expect(hasReceivingDiscrepancy({ poType: 'active-delivery', deliveries: [] })).toBe(false)
+    expect(hasReceivingDiscrepancy({ poType: 'active-delivery' })).toBe(false)
+    expect(hasReceivingDiscrepancy(null)).toBe(false)
+    expect(hasReceivingDiscrepancy(undefined)).toBe(false)
   })
 })
 

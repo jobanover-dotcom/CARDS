@@ -270,7 +270,7 @@ function PurchaseOrdersView() {
                 {v1PartialsError ? (
                   <tr><td colSpan={9} className="p-4 text-[#c62828] text-xs font-semibold">{v1PartialsError}</td></tr>
                 ) : v1Partials.length === 0 ? (
-                  <EmptyState colSpan={9} message="No V1 delivery shortfalls" />
+                  <EmptyState colSpan={9} message="No delivery shortfalls" />
                 ) : (
                   v1Partials.map((p) => {
                     const followUps = followUpMap[p.poNumber] || [];

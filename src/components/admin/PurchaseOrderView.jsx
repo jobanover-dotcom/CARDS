@@ -14,9 +14,10 @@ import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
 import { getPOs } from '../../../actions/pos';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
+import { IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
 
 function PurchaseOrderContent() {
-  const { stats, v1Stats, poVersion, deletePO, getPOQuantityTracker } = useAdminData();
+  const { stats, poVersion, deletePO, getPOQuantityTracker } = useAdminData();
   const searchParams = useSearchParams();
   const [selectedPoType, setSelectedPoType] = useState('all');
   const [poSearchInput, setPoSearchInput] = useState('');
@@ -47,7 +48,13 @@ function PurchaseOrderContent() {
   }, [poSearchInput]);
 
   const queryParams = useMemo(() => ({
-    poType: selectedPoType !== 'all' ? selectedPoType : undefined,
+    ...(selectedPoType === 'all'
+      ? {}
+      : selectedPoType === 'in-progress'
+        ? { statusIn: IN_PROGRESS_STATUSES }
+        : selectedPoType === 'discrepancy'
+          ? { hasReceivingDiscrepancy: true }
+          : { poType: selectedPoType }),
     search: poSearchQuery || undefined,
   }), [selectedPoType, poSearchQuery]);
 
@@ -105,8 +112,8 @@ function PurchaseOrderContent() {
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
         <StatCard label="Total POs" count={stats.totalPOs} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
-        <StatCard label="Active Delivery" count={stats.activeDeliveryCount} description="Orders currently in delivery" color="green" isActive={selectedPoType === 'active-delivery'} onClick={() => setSelectedPoType('active-delivery')} />
-        <StatCard label="Discrepancies" count={(stats.discrepancyCount || 0) + (v1Stats?.discrepancyDeliveryCount || 0)} description="Orders with issues (legacy + V1 receiving)" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
+        <StatCard label="In Progress" count={stats.inProgressCount} description="Orders moving through procurement" color="green" isActive={selectedPoType === 'in-progress'} onClick={() => setSelectedPoType('in-progress')} />
+        <StatCard label="Discrepancies" count={stats.unifiedDiscrepancyCount || 0} description="Orders with receiving discrepancies" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
       </div>
 
       <div className="mb-6">
@@ -118,20 +125,20 @@ function PurchaseOrderContent() {
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedPoType === 'all' ? 'All Purchase Orders' : selectedPoType === 'active-delivery' ? 'Active Delivery' : 'Discrepancies'}
+            {selectedPoType === 'all' ? 'All Purchase Orders' : selectedPoType === 'in-progress' ? 'In Progress' : 'Discrepancies'}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedPoType === 'all' ? 'All purchase orders' : selectedPoType === 'active-delivery' ? 'Purchase orders currently active and out for delivery' : 'Purchase orders with identified discrepancies'}
+            {selectedPoType === 'all' ? 'All purchase orders' : selectedPoType === 'in-progress' ? 'Purchase orders still moving through procurement' : 'Purchase orders with identified discrepancies'}
           </p>
         </div>
         <SearchInput placeholder="Search PO number..." value={poSearchInput} onChange={(e) => setPoSearchInput(e.target.value)} />
         <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full border-collapse text-[13px]">
-              <thead className={`bg-gradient-to-r sticky top-0 z-10 ${selectedPoType === 'all' ? 'from-[#e3f2fd] to-[#bbdefb]' : selectedPoType === 'active-delivery' ? 'from-[#e8f5e9] to-[#c8e6c9]' : 'from-[#fef5f5] to-[#ffcdd2]'}`}>
+              <thead className={`bg-gradient-to-r sticky top-0 z-10 ${selectedPoType === 'all' ? 'from-[#e3f2fd] to-[#bbdefb]' : selectedPoType === 'in-progress' ? 'from-[#e8f5e9] to-[#c8e6c9]' : 'from-[#fef5f5] to-[#ffcdd2]'}`}>
                 <tr>
                   {['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'Requisitioner', 'MRS No.', 'PO red date', 'Pick-up by', 'Status', 'Action'].map((h, i) => (
-                    <th key={i} className={`p-4 text-left font-bold whitespace-nowrap ${selectedPoType === 'all' ? 'text-[#1e3c72] border-b-2 border-[#1e3c72]/30' : selectedPoType === 'active-delivery' ? 'text-[#2e7d32] border-b-2 border-[#2e7d32]/30' : 'text-[#c62828] border-b-2 border-[#c62828]/30'}`}>{h}</th>
+                    <th key={i} className={`p-4 text-left font-bold whitespace-nowrap ${selectedPoType === 'all' ? 'text-[#1e3c72] border-b-2 border-[#1e3c72]/30' : selectedPoType === 'in-progress' ? 'text-[#2e7d32] border-b-2 border-[#2e7d32]/30' : 'text-[#c62828] border-b-2 border-[#c62828]/30'}`}>{h}</th>
                   ))}
                 </tr>
               </thead>

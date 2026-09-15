@@ -13,6 +13,7 @@ import { useAdminData } from '../../context/AdminDataContext';
 import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
 import { getDeliveryReportData } from '../../../actions/deliveries';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
+import { IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
 
 function DashboardView() {
   const { warehouses, poVersion, deletePO } = useAdminData();
@@ -31,7 +32,8 @@ function DashboardView() {
 
   const queryParams = useMemo(() => ({
     status: selectedStat === 'completed' ? 'completed' : undefined,
-    poType: selectedStat === 'discrepancy' ? 'discrepancy' : selectedStat === 'active-delivery' ? 'active-delivery' : undefined,
+    statusIn: selectedStat === 'in-progress' ? IN_PROGRESS_STATUSES : undefined,
+    hasReceivingDiscrepancy: selectedStat === 'discrepancy' ? true : undefined,
     search: dashboardSearchQuery || undefined,
     warehouse: selectedWarehouse || undefined,
   }), [selectedStat, dashboardSearchQuery, selectedWarehouse]);
@@ -50,8 +52,8 @@ function DashboardView() {
   const stats = scopedStats;
   const whTotalPOs = stats?.totalPOs ?? 0;
   const whCompletedPOs = stats?.completedPOs ?? 0;
-  const whDiscrepancyPOs = stats?.discrepancyCount ?? 0;
-  const whActiveDeliveryPOs = stats?.activeDeliveryCount ?? 0;
+  const whDiscrepancyPOs = stats?.unifiedDiscrepancyCount ?? 0;
+  const whInProgressPOs = stats?.inProgressCount ?? 0;
   const whIncompletePOs = whTotalPOs - whCompletedPOs;
 
   const handleOpenReceipt = (po) => {
@@ -101,21 +103,21 @@ function DashboardView() {
           topColor="red"
           topIsActive={selectedStat === 'discrepancy'}
           topOnClick={() => setSelectedStat(selectedStat === 'discrepancy' ? null : 'discrepancy')}
-          bottomLabel="Active Delivery"
-          bottomCount={whActiveDeliveryPOs}
+          bottomLabel="In Progress"
+          bottomCount={whInProgressPOs}
           bottomColor="yellow"
-          bottomIsActive={selectedStat === 'active-delivery'}
-          bottomOnClick={() => setSelectedStat(selectedStat === 'active-delivery' ? null : 'active-delivery')}
+          bottomIsActive={selectedStat === 'in-progress'}
+          bottomOnClick={() => setSelectedStat(selectedStat === 'in-progress' ? null : 'in-progress')}
         />
       </div>
 
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedStat === 'completed' ? 'Completed Purchase Orders' : selectedStat === 'discrepancy' ? 'Incomplete Purchase Orders (Discrepancy)' : selectedStat === 'active-delivery' ? 'Active Delivery Purchase Orders' : 'Total Purchase Orders'}
+            {selectedStat === 'completed' ? 'Completed Purchase Orders' : selectedStat === 'discrepancy' ? 'Incomplete Purchase Orders (Discrepancy)' : selectedStat === 'in-progress' ? 'In Progress Purchase Orders' : 'Total Purchase Orders'}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedStat === 'completed' ? 'Successfully completed purchase orders' : selectedStat === 'discrepancy' ? 'Purchase orders with quantity discrepancies' : selectedStat === 'active-delivery' ? 'Purchase orders currently in delivery' : 'All made purchase orders'}
+            {selectedStat === 'completed' ? 'Successfully completed purchase orders' : selectedStat === 'discrepancy' ? 'Purchase orders with quantity discrepancies' : selectedStat === 'in-progress' ? 'Purchase orders still moving through procurement' : 'All made purchase orders'}
           </p>
         </div>
         <div className="flex items-center justify-between gap-4 mb-4">
@@ -165,10 +167,10 @@ function DashboardView() {
                       const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
                       const totalQty = items.reduce((s, it) => s + it.qty, 0);
                       const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
-                      const isCompletedOrActive = order.status === 'completed' || order.poType === 'active-delivery';
+                      const isCompletedOrInProgress = order.status === 'completed' || IN_PROGRESS_STATUSES.includes(order.status);
                       const hasMonitoring = order.monQtyRvd && order.monQtyRvd !== '';
                       const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== totalQty;
-                      const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrActive ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
+                      const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrInProgress ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
                       return (
                         <tr key={index} onClick={() => handleOpenReceipt(order)} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${rowBg} hover:bg-[#f0f8fc]/50`}>
                           <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>

@@ -48,5 +48,28 @@ export function deliveryStatusLabel(value: string, fallback = 'For Delivery'): s
   return deliveryLabelByValue.get(value) ?? fallback
 }
 
+// Canonical receiving-discrepancy rule (single definition of what counts):
+// a PO has a receiving discrepancy iff it was explicitly flagged in legacy
+// receiving (poType) OR has a delivery explicitly marked as a discrepancy.
+// Approval shortfalls, procurement shortfalls, plain outstanding balances,
+// and partially-received (unflagged) shortfalls are NOT discrepancies.
+export interface DiscrepancyCheckPO {
+  poType?: string | null
+  deliveries?: { status?: string | null }[] | null
+}
+
+export function hasReceivingDiscrepancy(po: DiscrepancyCheckPO | null | undefined): boolean {
+  if (!po) return false
+  if (po.poType === 'discrepancy') return true
+  return (po.deliveries ?? []).some((d) => d?.status === DELIVERY_STATUS.DISCREPANCY.value)
+}
+
+// In Progress = every PO still moving through procurement (not completed,
+// not cancelled), across legacy and unified workflows. Derived from the
+// central map — UI filters and stats must use this, never poType.
+export const IN_PROGRESS_STATUSES = Object.values(PO_STATUS)
+  .map((s) => s.value)
+  .filter((v) => v !== PO_STATUS.COMPLETED.value && v !== PO_STATUS.CANCELLED.value)
+
 // poType is category only — never a workflow/result state.
 export const PO_TYPE_ACTIVE_DELIVERY = 'active-delivery'

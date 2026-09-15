@@ -3,17 +3,24 @@
 import { prisma } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
-import { PO_STATUS, poStatusLabel } from '@/src/lib/deliveryStatus';
+import { PO_STATUS, DELIVERY_STATUS, poStatusLabel } from '@/src/lib/deliveryStatus';
 import { isV1WorkflowPO } from '@/src/lib/poMigration';
 
-export interface POQuery { offset?: number; limit?: number; status?: string; statusIn?: string[]; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; inProcess?: boolean; }
+export interface POQuery { offset?: number; limit?: number; status?: string; statusIn?: string[]; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; inProcess?: boolean; hasReceivingDiscrepancy?: boolean; }
 
 function buildPOWhere(user: { role: string; warehouse: string } | null, params: POQuery = {}) {
   const scoped = user?.role === 'Warehouse'; const where: Record<string, unknown> = {};
   if (scoped) where.warehouse = user.warehouse; else if (params.warehouse) where.warehouse = params.warehouse;
   if (params.status) where.status = params.status; if (params.statusIn) where.status = { in: params.statusIn }; if (params.poType) where.poType = params.poType; if (params.poTypeIn) where.poType = { in: params.poTypeIn };
-  if (params.inProcess) where.AND = [{ status: 'incomplete' }, { poType: 'active-delivery' }];
-  if (params.search) where.OR = [{ poNumber: { contains: params.search, mode: 'insensitive' } }, { items: { some: { itemDescription: { contains: params.search, mode: 'insensitive' } } } }];
+  // Unified receiving-discrepancy filter: legacy-flagged POs OR POs with a
+  // discrepancy delivery. Takes precedence over the poType clause above so
+  // filtered rows always match the unifiedDiscrepancyCount.
+  const orClauses: Record<string, unknown>[] = [];
+  if (params.hasReceivingDiscrepancy) orClauses.push({ OR: [{ poType: 'discrepancy' }, { deliveries: { some: { status: DELIVERY_STATUS.DISCREPANCY.value } } }] });
+  if (params.search) orClauses.push({ OR: [{ poNumber: { contains: params.search, mode: 'insensitive' } }, { items: { some: { itemDescription: { contains: params.search, mode: 'insensitive' } } } }] });
+  if (orClauses.length === 1) where.OR = (orClauses[0] as { OR: unknown }).OR;
+  else if (orClauses.length > 1) where.AND = [...((where.AND as unknown[]) ?? []), ...orClauses];
+  if (params.inProcess) where.AND = [...((where.AND as unknown[]) ?? []), { status: 'incomplete' }, { poType: 'active-delivery' }];
   return where;
 }
 const poInclude = { items: { include: { monitoringItems: true } }, monitoringItems: true } as const;
@@ -27,11 +34,26 @@ export async function getReportData(params: POQuery = {}) { const user = await g
 export async function getPOByNumber(poNumber: string) { const user = await getCurrentUser(); if (!user) throw new Error('Unauthorized'); const po = await prisma.purchaseOrder.findUnique({ where: { poNumber }, include: poInclude }); if (!po) return null; if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized'); return po; }
 
 export async function getPOStats(warehouse?: string) {
-  const user = await getCurrentUser(); if (!user) return { totalPOs: 0, completedPOs: 0, incompletePOs: 0, activeDeliveryCount: 0, discrepancyCount: 0, activeDeliveryIncompleteCount: 0, partiallyReceivedCount: 0 };
+  const user = await getCurrentUser(); if (!user) return { totalPOs: 0, completedPOs: 0, incompletePOs: 0, activeDeliveryCount: 0, discrepancyCount: 0, activeDeliveryIncompleteCount: 0, partiallyReceivedCount: 0, inProgressCount: 0, unifiedDiscrepancyCount: 0 };
   const base: Record<string, unknown> = {}; if (user.role === 'Warehouse') base.warehouse = user.warehouse; else if (warehouse) base.warehouse = warehouse;
-  const [totalPOs, completedPOs, incompletePOs, activeDeliveryCount, discrepancyCount, activeDeliveryIncompleteCount, partiallyReceivedCount] = await prisma.$transaction([
-    prisma.purchaseOrder.count({ where: base }), prisma.purchaseOrder.count({ where: { ...base, status: 'completed' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete' } }), prisma.purchaseOrder.count({ where: { ...base, poType: 'active-delivery' } }), prisma.purchaseOrder.count({ where: { ...base, poType: 'discrepancy' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete', poType: 'active-delivery' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete', poType: 'partially-received' } }),
-  ]); return { totalPOs, completedPOs, incompletePOs, activeDeliveryCount, discrepancyCount, activeDeliveryIncompleteCount, partiallyReceivedCount };
+  // inProgressCount is the canonical procurement-workload stat: every PO not
+  // in a terminal state, regardless of legacy or unified workflow. It never
+  // uses poType as workflow state.
+  const inProgressWhere = { ...base, status: { notIn: [PO_STATUS.COMPLETED.value, PO_STATUS.CANCELLED.value] } };
+  const [totalPOs, completedPOs, incompletePOs, activeDeliveryCount, discrepancyCount, activeDeliveryIncompleteCount, partiallyReceivedCount, inProgressCount] = await prisma.$transaction([
+    prisma.purchaseOrder.count({ where: base }), prisma.purchaseOrder.count({ where: { ...base, status: 'completed' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete' } }), prisma.purchaseOrder.count({ where: { ...base, poType: 'active-delivery' } }), prisma.purchaseOrder.count({ where: { ...base, poType: 'discrepancy' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete', poType: 'active-delivery' } }), prisma.purchaseOrder.count({ where: { ...base, status: 'incomplete', poType: 'partially-received' } }), prisma.purchaseOrder.count({ where: inProgressWhere }),
+  ]);
+  // unifiedDiscrepancyCount is the canonical receiving-discrepancy stat: the
+  // union of legacy-flagged POs and POs with a discrepancy delivery.
+  // Approval/procurement shortfalls and plain outstanding balances are NOT
+  // discrepancies and are excluded by construction. Unioned by poNumber so a
+  // PO satisfying both arms is counted once.
+  const [legacyFlagged, deliveryFlagged] = await prisma.$transaction([
+    prisma.purchaseOrder.findMany({ where: { ...base, poType: 'discrepancy' }, select: { poNumber: true } }),
+    prisma.delivery.findMany({ where: { ...(user.role === 'Warehouse' ? { po: { warehouse: user.warehouse } } : (warehouse ? { po: { warehouse } } : {})), status: DELIVERY_STATUS.DISCREPANCY.value }, select: { poNumber: true } }),
+  ]);
+  const unifiedDiscrepancyCount = new Set([...legacyFlagged.map((p) => p.poNumber), ...deliveryFlagged.map((d) => d.poNumber)]).size;
+  return { totalPOs, completedPOs, incompletePOs, activeDeliveryCount, discrepancyCount, activeDeliveryIncompleteCount, partiallyReceivedCount, inProgressCount, unifiedDiscrepancyCount };
 }
 export async function getMyPOCount() { const user = await getCurrentUser(); if (!user) return 0; return prisma.purchaseOrder.count({ where: { profileId: user.id } }); }
 
