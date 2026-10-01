@@ -10,13 +10,13 @@ import WarehouseFilter from './WarehouseFilter';
 import PageSkeleton from '../ui/PageSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
-import { getPOs, getPOStats } from '../../../actions/pos';
-import { getSimplifiedReport } from '../../../actions/deliveries';
-import { PO_STATUS, IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
+import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
+import { getDeliveryReportData } from '../../../actions/deliveries';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
+import { IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
 
 function DashboardView() {
-  const { warehouses, poVersion, deletePO, workload } = useAdminData();
+  const { warehouses, poVersion, deletePO } = useAdminData();
   const [selectedStat, setSelectedStat] = useState(null);
   const [dashboardSearchInput, setDashboardSearchInput] = useState('');
   const [dashboardSearchQuery, setDashboardSearchQuery] = useState('');
@@ -31,8 +31,9 @@ function DashboardView() {
   }, [dashboardSearchInput]);
 
   const queryParams = useMemo(() => ({
-    status: selectedStat === 'completed' ? 'completed' : selectedStat === 'on-delivery' ? PO_STATUS.ON_DELIVERY.value : undefined,
+    status: selectedStat === 'completed' ? 'completed' : undefined,
     statusIn: selectedStat === 'in-progress' ? IN_PROGRESS_STATUSES : undefined,
+    hasReceivingDiscrepancy: selectedStat === 'discrepancy' ? true : undefined,
     search: dashboardSearchQuery || undefined,
     warehouse: selectedWarehouse || undefined,
   }), [selectedStat, dashboardSearchQuery, selectedWarehouse]);
@@ -49,18 +50,19 @@ function DashboardView() {
   }, [selectedWarehouse, poVersion]);
 
   const stats = scopedStats;
-  const whTotalPOs = stats?.totalPOs ?? workload?.totalPOs ?? 0;
-  const whCompletedPOs = stats?.completedPOs ?? workload?.completedPOs ?? 0;
-  const whFollowUpPOs = workload?.followUpCount ?? 0;
-  const whOnDeliveryPOs = workload?.onDeliveryPOs ?? 0;
-  const whInProgressPOs = stats?.inProgressCount ?? workload?.inProgress ?? 0;
+  const whTotalPOs = stats?.totalPOs ?? 0;
+  const whCompletedPOs = stats?.completedPOs ?? 0;
+  const whDiscrepancyPOs = stats?.unifiedDiscrepancyCount ?? 0;
+  const whInProgressPOs = stats?.inProgressCount ?? 0;
+  const whIncompletePOs = whTotalPOs - whCompletedPOs;
 
   const handleOpenReceipt = (po) => {
     setSelectedReceiptPo(po);
     setShowReceiptModal(true);
   };
 
-  const fetchReportData = () => getSimplifiedReport({ warehouse: selectedWarehouse || undefined, search: dashboardSearchQuery || undefined });
+  const fetchReportData = () => getReportData(queryParams);
+  const fetchDeliveryReportData = () => getDeliveryReportData({ warehouse: selectedWarehouse || undefined });
 
   if (initialLoading) {
     return (
@@ -95,36 +97,27 @@ function DashboardView() {
           isActive={selectedStat === 'completed'}
           onClick={() => setSelectedStat(selectedStat === 'completed' ? null : 'completed')}
         />
-        <StatCard
-          label="Follow-Up Required"
-          count={whFollowUpPOs}
-          color="red"
-          isActive={selectedStat === 'follow-up'}
-          onClick={() => setSelectedStat(selectedStat === 'follow-up' ? null : 'follow-up')}
-        />
-        <StatCard
-          label="On Delivery"
-          count={whOnDeliveryPOs}
-          color="yellow"
-          isActive={selectedStat === 'on-delivery'}
-          onClick={() => setSelectedStat(selectedStat === 'on-delivery' ? null : 'on-delivery')}
-        />
-        <StatCard
-          label="In Progress"
-          count={whInProgressPOs}
-          color="yellow"
-          isActive={selectedStat === 'in-progress'}
-          onClick={() => setSelectedStat(selectedStat === 'in-progress' ? null : 'in-progress')}
+        <StackedStatCard
+          topLabel="Incomplete"
+          topCount={whDiscrepancyPOs}
+          topColor="red"
+          topIsActive={selectedStat === 'discrepancy'}
+          topOnClick={() => setSelectedStat(selectedStat === 'discrepancy' ? null : 'discrepancy')}
+          bottomLabel="In Progress"
+          bottomCount={whInProgressPOs}
+          bottomColor="yellow"
+          bottomIsActive={selectedStat === 'in-progress'}
+          bottomOnClick={() => setSelectedStat(selectedStat === 'in-progress' ? null : 'in-progress')}
         />
       </div>
 
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedStat === 'completed' ? 'Completed Purchase Orders' : selectedStat === 'follow-up' ? 'Follow-Up Required' : selectedStat === 'on-delivery' ? 'On Delivery Purchase Orders' : selectedStat === 'in-progress' ? 'In Progress Purchase Orders' : 'Total Purchase Orders'}
+            {selectedStat === 'completed' ? 'Completed Purchase Orders' : selectedStat === 'discrepancy' ? 'Incomplete Purchase Orders (Discrepancy)' : selectedStat === 'in-progress' ? 'In Progress Purchase Orders' : 'Total Purchase Orders'}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedStat === 'completed' ? 'Successfully completed purchase orders' : selectedStat === 'follow-up' ? 'Approved but not yet fully purchased (Purchaser responsibility)' : selectedStat === 'on-delivery' ? 'Purchased items dispatched by the supplier' : selectedStat === 'in-progress' ? 'Purchase orders still moving through procurement' : 'All made purchase orders'}
+            {selectedStat === 'completed' ? 'Successfully completed purchase orders' : selectedStat === 'discrepancy' ? 'Purchase orders with quantity discrepancies' : selectedStat === 'in-progress' ? 'Purchase orders still moving through procurement' : 'All made purchase orders'}
           </p>
         </div>
         <div className="flex items-center justify-between gap-4 mb-4">
@@ -133,7 +126,7 @@ function DashboardView() {
             value={dashboardSearchInput}
             onChange={(e) => setDashboardSearchInput(e.target.value)}
           />
-          <GenerateReportButton fetchReportData={fetchReportData} />
+          <GenerateReportButton fetchReportData={fetchReportData} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} fetchDeliveryReportData={fetchDeliveryReportData} />
         </div>
         <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
           <div className="overflow-x-auto max-h-[500px]">

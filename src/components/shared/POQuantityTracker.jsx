@@ -39,24 +39,17 @@ function POQuantityTracker({ tracker, variant = 'warehouse', actionSlot = null }
             <FlowStep label="REQUESTED" value={it.requestedQty} />
             <FlowStep label="APPROVED" value={it.approvedQty} />
             <FlowStep label="PURCHASED" value={it.purchasedQty} />
-            {it.deliveredQty !== undefined && <FlowStep label="DELIVERED" value={it.deliveredQty} />}
+            <FlowStep label="DELIVERED" value={it.deliveredQty} />
             <FlowStep label="RECEIVED" value={it.receivedQty} last />
           </div>
 
           <div className="mt-3 text-[12px] font-semibold text-[#333]">
-            Outstanding: {it.requestOutstanding ?? it.outstanding ?? 0}
-            {it.unpurchased !== undefined && <span> · Unpurchased: {it.unpurchased}</span>}
+            Outstanding: {it.requestOutstanding}
           </div>
           <div className="mt-1 text-[12px] text-[#555] flex flex-col gap-0.5">
-            <span>{it.procurementShortfall ?? it.unpurchased ?? 0} Not Purchased</span>
-            {(it.deliveryRemaining !== undefined || it.receivingRemaining !== undefined) ? (
-              <>
-                <span>{it.deliveryRemaining ?? 0} Awaiting Delivery</span>
-                <span>{it.receivingRemaining ?? it.outstanding ?? 0} Awaiting Receiving</span>
-              </>
-            ) : (
-              <span>{it.outstanding ?? 0} Outstanding Receiving</span>
-            )}
+            <span>{it.procurementShortfall} Not Purchased</span>
+            <span>{it.deliveryRemaining} Awaiting Delivery</span>
+            <span>{it.receivingRemaining} Awaiting Receiving</span>
           </div>
           {it.approvalShortfall > 0 && (
             <div className="mt-1 text-[11px] text-[#8d6e00]">{it.approvalShortfall} never approved — not eligible for procurement follow-up.</div>

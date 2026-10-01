@@ -17,24 +17,52 @@ function sanitizeFileName(name: string) {
 async function assertCanAccessDelivery(deliveryNumber: string) {
   const user = await getCurrentUser();
   if (!user) throw new Error('Unauthorized');
-  // Archived deliveries: Purchaser/Superadmin read-only. Warehouse has no access.
-  if (user.role !== 'Admin' && user.role !== 'Superadmin') throw new Error('Unauthorized: archived deliveries are available to purchasers and superadmins only');
   const delivery = await prisma.delivery.findUnique({
     where: { deliveryNumber },
     include: { po: { select: { warehouse: true } } },
   });
   if (!delivery) throw new Error('Delivery not found');
+  if (user.role === 'Warehouse' && delivery.po.warehouse !== user.warehouse) throw new Error('Unauthorized');
   return { user, delivery };
 }
 
-// RETIRED: Delivery Receipt photo upload removed from the active workflow.
-// Receiving records quantity + remarks only. Historical rows are preserved.
+// Warehouse photographs the physical DR, uploads via the signed URL, then
+// calls recordReceipt() so CARDS stores path metadata (not the image bytes).
 export async function getReceiptUploadUrl(deliveryNumber: string, filename: string, contentType: string) {
-  throw new Error('Delivery receipt upload is retired and no longer part of the workflow.');
+  const { user } = await assertCanAccessDelivery(deliveryNumber);
+  if (user.role !== 'Warehouse' && user.role !== 'Admin' && user.role !== 'Superadmin')
+    throw new Error('Unauthorized');
+  const ext = sanitizeFileName(filename).split('.').pop()?.toLowerCase() ?? '';
+  if (!ALLOWED_EXTENSIONS.has(ext)) throw new Error('Only JPG, PNG, WebP, or PDF receipts are accepted');
+  if (!/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(contentType)) throw new Error('Unsupported receipt content type');
+
+  const objectName = `${deliveryNumber}/${crypto.randomUUID()}-${sanitizeFileName(filename)}`;
+  const supabase = await createAdminSupabase();
+  const { data, error } = await supabase.storage.from(RECEIPT_BUCKET).createSignedUploadUrl(objectName);
+  if (error) throw new Error(`Could not prepare receipt upload: ${error.message}`);
+  return { storagePath: objectName, signedUrl: data.signedUrl, token: data.token };
 }
 
 export async function recordReceipt(deliveryNumber: string, storagePath: string) {
-  throw new Error('Delivery receipt upload is retired and no longer part of the workflow.');
+  const { user, delivery } = await assertCanAccessDelivery(deliveryNumber);
+  if (user.role !== 'Warehouse' && user.role !== 'Admin' && user.role !== 'Superadmin')
+    throw new Error('Unauthorized');
+  if (!storagePath.startsWith(`${deliveryNumber}/`)) throw new Error('Receipt path does not belong to this delivery');
+  return prisma.$transaction(async (tx) => {
+    const receipt = await tx.deliveryReceipt.create({
+      data: { deliveryId: delivery.id, storagePath, uploadedBy: user.username },
+    });
+    await tx.deliveryAuditLog.create({
+      data: {
+        deliveryId: delivery.id,
+        poNumber: delivery.poNumber,
+        action: 'dr_uploaded',
+        detail: storagePath,
+        actor: user.username,
+      },
+    });
+    return receipt;
+  });
 }
 
 export async function getReceiptViewUrl(storagePath: string) {

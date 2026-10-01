@@ -16,7 +16,6 @@ export const PO_STATUS = entries({
   AWAITING_PURCHASE: { value: 'awaiting_purchase', label: 'Awaiting Purchase' },
   PURCHASE_CONFIRMED: { value: 'purchase_confirmed', label: 'Purchase Confirmed' },
   READY_FOR_DELIVERY: { value: 'ready_for_delivery', label: 'Ready for Delivery' },
-  ON_DELIVERY: { value: 'on_delivery', label: 'On Delivery' },
   COMPLETED: { value: 'completed', label: 'Completed' },
   CANCELLED: { value: 'cancelled', label: 'Cancelled' },
 } as const)

@@ -13,14 +13,6 @@ export const requestSchema = z.object({
 
 export type RequestInput = z.infer<typeof requestSchema>
 
-// Item description typeahead over this warehouse's past request lines
-export const itemSuggestionQuerySchema = z.object({
-  query: z.string().max(120).default(''),
-  limit: z.number().int().min(1).max(20).default(8),
-})
-
-export type ItemSuggestionQuery = z.infer<typeof itemSuggestionQuerySchema>
-
 // Purchase Order validation
 export const purchaseOrderSchema = z.object({
   date: z.string().min(1, 'Date is required'),

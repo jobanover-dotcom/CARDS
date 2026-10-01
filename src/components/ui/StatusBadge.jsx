@@ -12,7 +12,6 @@ const statusStyles = {
   'Awaiting Purchase': 'bg-yellow-50 text-yellow-700 border-yellow-300',
   'Purchase Confirmed': 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
   'Ready for Delivery': 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
-  'On Delivery': 'bg-[#e0f2f1] text-[#00695c] border-[#80cbc4]',
   'For Delivery': 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
   'In Transit': 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
   Received: 'bg-gray-100 text-gray-700 border-gray-300',

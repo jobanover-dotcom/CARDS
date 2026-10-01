@@ -5,7 +5,6 @@ import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
 import { buildPOChains } from './deliveries';
 import { isV1WorkflowPO } from '@/src/lib/poMigration';
-import { itemSuggestionQuerySchema } from '@/src/lib/validations/request';
 
 type Tx = Prisma.TransactionClient;
 
@@ -42,42 +41,6 @@ export async function getRequestCounts() {
     prisma.warehouseRequest.count({ where: { ...base, status: 'Partially Approved' } }),
   ]);
   return { total, pending, rejected, approved, partiallyApproved };
-}
-
-export interface ItemSuggestion { itemDescription: string; unit: string; }
-
-// Typeahead source: distinct descriptions this warehouse has already
-// requisitioned. Scoped exactly like getRequests, ordered newest-first so the
-// newest entry of a repeated description supplies its unit. Capped scan + JS
-// dedupe avoids depending on groupBy relation filters.
-export async function getItemDescriptionSuggestions(query: string, limit = 8): Promise<ItemSuggestion[]> {
-  const user = await getCurrentUser();
-  if (!user) throw new Error('Unauthorized');
-  const parsed = itemSuggestionQuerySchema.safeParse({ query, limit });
-  const q = (parsed.success ? parsed.data.query : '').trim();
-  const max = parsed.success ? parsed.data.limit : 8;
-
-  const rows = await prisma.warehouseRequestItem.findMany({
-    where: {
-      ...(q ? { itemDescription: { contains: q, mode: 'insensitive' } } : {}),
-      ...(user.role === 'Warehouse' ? { request: { warehouse: user.warehouse } } : {}),
-    },
-    select: { itemDescription: true, unit: true },
-    orderBy: { createdAt: 'desc' },
-    take: 200,
-  });
-
-  const seen = new Set<string>();
-  const suggestions: ItemSuggestion[] = [];
-  for (const row of rows) {
-    const itemDescription = row.itemDescription.trim();
-    const key = itemDescription.toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    suggestions.push({ itemDescription, unit: row.unit });
-    if (suggestions.length >= max) break;
-  }
-  return suggestions;
 }
 
 function validateRequestItems(items: RequestItemInput[]) {
