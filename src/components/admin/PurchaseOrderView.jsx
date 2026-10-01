@@ -14,10 +14,10 @@ import TableScrollSentinel from '../ui/TableScrollSentinel';
 import { useAdminData } from '../../context/AdminDataContext';
 import { getPOs } from '../../../actions/pos';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
-import { IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
+import { IN_PROGRESS_STATUSES, PO_STATUS } from '../../lib/deliveryStatus';
 
 function PurchaseOrderContent() {
-  const { stats, poVersion, deletePO, getPOQuantityTracker } = useAdminData();
+  const { stats, workload, poVersion, deletePO, getSimplifiedTracker, getPurchaserFollowUps } = useAdminData();
   const searchParams = useSearchParams();
   const [selectedPoType, setSelectedPoType] = useState('all');
   const [poSearchInput, setPoSearchInput] = useState('');
@@ -35,7 +35,7 @@ function PurchaseOrderContent() {
     setTrackerPoNumber(poNumber);
     setTrackerData(null);
     setTrackerError(null);
-    getPOQuantityTracker(poNumber)
+    getSimplifiedTracker(poNumber)
       .then((t) => setTrackerData(t))
       .catch((e) => setTrackerError(e?.message || 'Failed to load tracker'));
   };
@@ -52,9 +52,11 @@ function PurchaseOrderContent() {
       ? {}
       : selectedPoType === 'in-progress'
         ? { statusIn: IN_PROGRESS_STATUSES }
-        : selectedPoType === 'discrepancy'
-          ? { hasReceivingDiscrepancy: true }
-          : { poType: selectedPoType }),
+        : selectedPoType === 'on-delivery'
+          ? { status: PO_STATUS.ON_DELIVERY.value }
+          : selectedPoType === 'follow-up'
+            ? { statusIn: IN_PROGRESS_STATUSES }
+            : { status: selectedPoType }),
     search: poSearchQuery || undefined,
   }), [selectedPoType, poSearchQuery]);
 
@@ -111,9 +113,11 @@ function PurchaseOrderContent() {
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
-        <StatCard label="Total POs" count={stats.totalPOs} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
-        <StatCard label="In Progress" count={stats.inProgressCount} description="Orders moving through procurement" color="green" isActive={selectedPoType === 'in-progress'} onClick={() => setSelectedPoType('in-progress')} />
-        <StatCard label="Discrepancies" count={stats.unifiedDiscrepancyCount || 0} description="Orders with receiving discrepancies" color="red" isActive={selectedPoType === 'discrepancy'} onClick={() => setSelectedPoType('discrepancy')} />
+        <StatCard label="Total POs" count={stats.totalPOs ?? workload?.totalPOs ?? 0} description="All purchase orders" color="blue" isActive={selectedPoType === 'all'} onClick={() => setSelectedPoType('all')} />
+        <StatCard label="In Progress" count={stats.inProgressCount ?? workload?.inProgress ?? 0} description="Orders moving through procurement" color="green" isActive={selectedPoType === 'in-progress'} onClick={() => setSelectedPoType('in-progress')} />
+        <StatCard label="Follow-Up Required" count={workload?.followUpCount ?? 0} description="Approved but not fully purchased" color="red" isActive={selectedPoType === 'follow-up'} onClick={() => setSelectedPoType('follow-up')} />
+        <StatCard label="On Delivery" count={workload?.onDeliveryPOs ?? 0} description="Dispatched by supplier" color="yellow" isActive={selectedPoType === 'on-delivery'} onClick={() => setSelectedPoType('on-delivery')} />
+        <StatCard label="Completed" count={stats.completedPOs ?? workload?.completedPOs ?? 0} description="Fully received" color="green" isActive={selectedPoType === 'completed'} onClick={() => setSelectedPoType('completed')} />
       </div>
 
       <div className="mb-6">
@@ -125,10 +129,10 @@ function PurchaseOrderContent() {
       <div className="mt-8">
         <div className="mb-4">
           <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedPoType === 'all' ? 'All Purchase Orders' : selectedPoType === 'in-progress' ? 'In Progress' : 'Discrepancies'}
+            {selectedPoType === 'all' ? 'All Purchase Orders' : selectedPoType === 'in-progress' ? 'In Progress' : selectedPoType === 'follow-up' ? 'Follow-Up Required' : selectedPoType === 'on-delivery' ? 'On Delivery' : selectedPoType === 'completed' ? 'Completed' : selectedPoType}
           </h2>
           <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedPoType === 'all' ? 'All purchase orders' : selectedPoType === 'in-progress' ? 'Purchase orders still moving through procurement' : 'Purchase orders with identified discrepancies'}
+            {selectedPoType === 'all' ? 'All purchase orders' : selectedPoType === 'in-progress' ? 'Purchase orders still moving through procurement' : selectedPoType === 'follow-up' ? 'Approved but not fully purchased — Purchaser responsibility, same PO' : selectedPoType === 'on-delivery' ? 'Purchased items dispatched by the supplier' : 'Completed purchase orders'}
           </p>
         </div>
         <SearchInput placeholder="Search PO number..." value={poSearchInput} onChange={(e) => setPoSearchInput(e.target.value)} />

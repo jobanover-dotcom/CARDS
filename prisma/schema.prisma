@@ -54,6 +54,10 @@ model PurchaseOrder {
   purchaseConfirmedAt DateTime?
   purchaseConfirmedBy String?
   readyForDeliveryAt DateTime?
+  // Purchaser checkpoint: supplier has dispatched/is delivering purchased items.
+  // Distinct from ready_for_delivery (ready to be sent). Set via markOnDelivery.
+  onDeliveryAt DateTime?
+  onDeliveryBy String?
   // Link to the source WarehouseRequest (reqNumber) for request-level
   // balances (requested vs received). Null for legacy/manual POs, which fall
   // back to an mrsNo lookup and then to PO quantities.
@@ -71,10 +75,34 @@ model PurchaseOrderItem {
   unit String
   // Actually purchased quantity (never overwrites qty); null until confirmPurchase
   purchasedQty Int?
+  // Actually received quantity confirmed by Warehouse (simplified receiving,
+  // NOT delivery tracking). 0 until receiving; never exceeds purchasedQty.
+  receivedQty Int @default(0)
+  // Optional link to the standardized Item Catalog entry.
+  itemId String?
+  item Item? @relation(fields: [itemId], references: [id])
   createdAt DateTime @default(now())
   monitoringItems PurchaseOrderMonitoringItem[]
   deliveryItems DeliveryItem[]
   @@index([poNumber])
+}
+
+// Standardized Item Catalog. `normalizedName` (lowercase + trimmed) enforces
+// duplicate prevention across spelling/capitalization variations. `category`
+// is free-text for now so it can later migrate to a controlled table.
+// `aliases` holds alternate names for search.
+model Item {
+  id String @id @default(uuid())
+  name String
+  normalizedName String @unique
+  unit String
+  category String?
+  active Boolean @default(true)
+  aliases String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  purchaseOrderItems PurchaseOrderItem[]
+  warehouseRequestItems WarehouseRequestItem[]
 }
 
 model PurchaseOrderMonitoringItem {
@@ -115,6 +143,9 @@ model WarehouseRequestItem {
   qty Int
   unit String
   approvedQty Int?
+  // Optional link to the standardized Item Catalog entry.
+  itemId String?
+  item Item? @relation(fields: [itemId], references: [id])
   createdAt DateTime @default(now())
   @@index([reqNumber])
 }

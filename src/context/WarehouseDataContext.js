@@ -1,7 +1,7 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, updatePOMonitoring as updatePOMonitoringServer, updatePO as updatePOServer } from '../../actions/pos';
-import { confirmReceiving as confirmReceivingServer, getPOFollowUpBalance as getPOFollowUpBalanceServer, getPOQuantityTracker as getPOQuantityTrackerServer, getV1WarehouseStats as getV1WarehouseStatsServer, getWarehouseV1Partials as getWarehouseV1PartialsServer } from '../../actions/deliveries';
+import { confirmReceiving as confirmReceivingServer, confirmReceivingV2 as confirmReceivingV2Server, getPOFollowUpBalance as getPOFollowUpBalanceServer, getPOQuantityTracker as getPOQuantityTrackerServer, getSimplifiedTracker as getSimplifiedTrackerServer, getWarehouseReceivingDue as getWarehouseReceivingDueServer } from '../../actions/deliveries';
 import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
@@ -13,11 +13,14 @@ export function WarehouseDataProvider({ children }) {
   const [poVersion, setPoVersion] = useState(0);
   const [requestVersion, setRequestVersion] = useState(0);
 
+  const [receivingDue, setReceivingDue] = useState([]);
+
   const refreshStats = useCallback(async () => {
     try {
-      const [legacy, v1] = await Promise.all([getPOStats(), getV1WarehouseStatsServer()]);
+      const [legacy, due] = await Promise.all([getPOStats(), getWarehouseReceivingDueServer().catch(() => [])]);
       setStats(legacy);
-      setV1Stats(v1);
+      setReceivingDue(due);
+      setV1Stats({ openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0, outstandingPOCount: due.length });
     }
     catch (e) { console.error('Failed to load stats', e); }
   }, []);
@@ -53,24 +56,30 @@ export function WarehouseDataProvider({ children }) {
     return delivery;
   }, [refreshStats]);
 
+  const confirmReceivingV2 = useCallback(async (input) => {
+    const result = await confirmReceivingV2Server(input);
+    setPoVersion((v) => v + 1);
+    await refreshStats();
+    return result;
+  }, [refreshStats]);
+
   // V1 follow-up data comes only from server-computed DeliveryItem balances.
   const getPOFollowUpBalance = useCallback(async (poNumber) => getPOFollowUpBalanceServer(poNumber), []);
-  const getWarehouseV1Partials = useCallback(async () => getWarehouseV1PartialsServer(), []);
+  const getWarehouseV1Partials = useCallback(async () => getWarehouseReceivingDueServer(), []);
   const getPOQuantityTracker = useCallback(async (poNumber) => getPOQuantityTrackerServer(poNumber), []);
+  const getSimplifiedTracker = useCallback(async (poNumber) => getSimplifiedTrackerServer(poNumber), []);
 
   return <WarehouseDataContext.Provider value={{
-    stats, v1Stats, loading, poVersion, requestVersion,
+    stats, v1Stats, loading, poVersion, requestVersion, receivingDue,
     completedCount: stats.completedPOs,
-    // Unified V1 definitions — all cards derive from Delivery/DeliveryItem
-    // aggregates via getV1WarehouseStats, never from legacy poType counts.
-    // Partially Received folds in every PO with a real quantity gap
-    // (requestOutstanding > 0), including approval shortfalls with no
-    // partial-status delivery.
-    openDeliveryCount: v1Stats.openDeliveryCount || 0,
-    discrepancyCount: v1Stats.discrepancyDeliveryCount || 0,
+    // Simplified workflow: receiving due = POs with purchased > received.
+    // Purchasing follow-up is a Purchaser responsibility, never Warehouse.
+    openDeliveryCount: 0,
+    discrepancyCount: 0,
     partiallyReceivedCount: v1Stats.outstandingPOCount || 0,
-    refreshStats, updatePO, updatePOMonitoring, createRequest, confirmReceiving,
-    getPOFollowUpBalance, getWarehouseV1Partials, getPOQuantityTracker,
+    receivingDueCount: receivingDue.length,
+    refreshStats, updatePO, updatePOMonitoring, createRequest, confirmReceiving, confirmReceivingV2,
+    getPOFollowUpBalance, getWarehouseV1Partials, getPOQuantityTracker, getSimplifiedTracker,
   }}>{children}</WarehouseDataContext.Provider>;
 }
 

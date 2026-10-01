@@ -89,7 +89,7 @@ export interface MonitoringUpdate { items: { poItemId: string; qtyReceived: numb
 function assertLegacyPO(po: { status: string; items: { purchasedQty: number | null }[] } & { _count?: { deliveries: number } }) {
   if (isV1WorkflowPO(po)) throw new Error('This purchase order uses the delivery workflow and cannot be updated through the legacy path');
 }
-/** @deprecated Legacy single-shot receiving for pre-V1 records only. New workflow: actions/deliveries.ts (confirmPurchase → markReadyForDelivery → proceedToDelivery → confirmReceiving). */
+/** @deprecated Legacy single-shot receiving for pre-V1 records only. New workflow: actions/deliveries.ts (confirmPurchase → markOnDelivery → confirmReceivingV2). */
 export async function updatePOMonitoring(poNumber: string, monitoring: MonitoringUpdate) {
   const user = await getCurrentUser(); if (!user || user.role !== 'Warehouse') throw new Error('Unauthorized: only warehouse users can record delivery monitoring');
   if (!monitoring.deliveredBy?.trim()) throw new Error('Delivered By is required'); if (!monitoring.plateNumber?.trim()) throw new Error('Plate Number is required'); if (!monitoring.dateDelivered) throw new Error('Date delivered is required'); if (!monitoring.referenceNo?.trim()) throw new Error('Reference No. is required'); if (!monitoring.drDate) throw new Error('DR date is required');
@@ -119,7 +119,7 @@ export async function updatePO(poNumber: string, data: Partial<{ status: string;
     try {
       assertLegacyPO({ status: po.status, items: po.items, _count: po._count });
     } catch {
-      throw new Error('This purchase order uses the delivery workflow; update it through confirmPurchase / proceedToDelivery / confirmReceiving instead');
+      throw new Error('This purchase order uses the simplified procurement workflow; update it through confirmPurchase / markOnDelivery / confirmReceivingV2 instead');
     }
     if (items !== undefined && po._count.deliveries > 0) throw new Error('PO items cannot be replaced once deliveries exist');
   }

@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { getRoleLabel } from '../../lib/roleLabel';
 import { getMyPOCount } from '../../../actions/pos';
+import CatalogManager from '../admin/CatalogManager';
 
 function PurchaserSettingsView() {
   const { user, getUserInfo, changePassword } = useAuth();
@@ -75,6 +76,8 @@ function PurchaserSettingsView() {
           </div>
         </div>
       </div>
+
+      <CatalogManager />
 
       <div className="border border-gray-200 rounded-xl p-6">
         <h3 className="m-0 text-lg font-bold text-[#1e3c72] mb-4">Change Password</h3>

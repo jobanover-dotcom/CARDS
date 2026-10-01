@@ -10,7 +10,7 @@ export const V1_AWAITING_PURCHASE = {
   statusLabel: 'Awaiting Purchase',
 };
 
-export const V1_PO_STATUSES = ['awaiting_purchase', 'purchase_confirmed', 'ready_for_delivery'];
+export const V1_PO_STATUSES = ['awaiting_purchase', 'purchase_confirmed', 'ready_for_delivery', 'on_delivery'];
 
 // True when a PO has entered the V1 procurement → delivery → receiving
 // workflow. Shared by the backfill mapper and the legacy-path guards in

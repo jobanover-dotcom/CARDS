@@ -4,6 +4,11 @@
 // from the database inside the transaction and reject over-claims.
 // No stage is ever overwritten by a later stage; each balance below answers
 // exactly one workflow question.
+//
+// SIMPLIFIED WORKFLOW (canonical going forward):
+//   unpurchasedQty = max(0, approvedQty - purchasedQty)   (Purchaser Follow-Up)
+//   receivingOutstanding = max(0, purchasedQty - receivedQty)
+// Delivered-layer helpers below are preserved for historical DEL-* reads only.
 
 export interface DeliveryQtyRow {
   deliveredQty: number
@@ -58,6 +63,53 @@ export function assertValidPurchasedQty(purchasedQty: number, maxQty: number, la
     throw new Error(
       `Purchased quantity for "${label}" cannot exceed the approved quantity of ${maxQty}`,
     )
+}
+
+// --- Simplified procurement workflow (canonical) ---
+
+/** Follow-Up belongs to the Purchaser: max(0, approved - purchased). */
+export function unpurchasedQty(approvedQty: number | null | undefined, purchasedQty: number | null | undefined): number {
+  return Math.max(0, (approvedQty ?? 0) - (purchasedQty ?? 0))
+}
+
+/** Receiving shortfall: max(0, purchased - received). Separate from purchasing shortfall. */
+export function receivingOutstanding(purchasedQty: number | null | undefined, receivedQty: number | null | undefined): number {
+  return Math.max(0, (purchasedQty ?? 0) - (receivedQty ?? 0))
+}
+
+/** Simplified receiving guard: 0 <= received <= purchased. */
+export function assertValidReceivedQtyV2(receivedQty: number, purchasedQty: number, label: string): void {
+  if (!Number.isInteger(receivedQty) || receivedQty < 0)
+    throw new Error(`Received quantity for "${label}" must be a whole number of 0 or more`)
+  if (receivedQty > purchasedQty)
+    throw new Error(`Received quantity for "${label}" cannot exceed the purchased quantity of ${purchasedQty}`)
+}
+
+export interface SimplifiedChainInput {
+  requestedQty: number | null | undefined
+  approvedQty: number | null | undefined
+  purchasedQty: number | null | undefined
+  receivedQty: number | null | undefined
+}
+
+export interface SimplifiedChain {
+  requestedQty: number
+  approvedQty: number
+  purchasedQty: number
+  receivedQty: number
+  unpurchased: number
+  outstanding: number
+  followUpRequired: boolean
+}
+
+export function buildSimplifiedChain(input: SimplifiedChainInput): SimplifiedChain {
+  const requestedQty = Math.max(0, input.requestedQty ?? 0)
+  const approvedQty = Math.max(0, input.approvedQty ?? 0)
+  const purchasedQty = Math.max(0, input.purchasedQty ?? 0)
+  const receivedQty = Math.max(0, input.receivedQty ?? 0)
+  const unpurchased = unpurchasedQty(approvedQty, purchasedQty)
+  const outstanding = receivingOutstanding(purchasedQty, receivedQty)
+  return { requestedQty, approvedQty, purchasedQty, receivedQty, unpurchased, outstanding, followUpRequired: unpurchased > 0 }
 }
 
 // ---------------------------------------------------------------------------

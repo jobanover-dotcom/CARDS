@@ -17,7 +17,7 @@ function HistoryView() {
   const [historySearchQuery, setHistorySearchQuery] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
   const [appliedFilters, setAppliedFilters] = useState({
-    completed: false, incomplete: false, activeDelivery: false, inProcess: false,
+    completed: false, incomplete: false, onDelivery: false, inProcess: false,
     awaitingPurchase: false, purchaseConfirmed: false, readyForDelivery: false,
     approved: false, pending: false, rejected: false,
   });
@@ -34,9 +34,8 @@ function HistoryView() {
   const isPOsTab = historyTab === 'purchase-orders';
 
   const poQueryParams = useMemo(() => ({
-    status: appliedFilters.completed ? 'completed' : appliedFilters.incomplete ? 'incomplete' : undefined,
+    status: appliedFilters.completed ? 'completed' : appliedFilters.incomplete ? 'incomplete' : appliedFilters.onDelivery ? 'on_delivery' : undefined,
     statusIn: appliedFilters.awaitingPurchase ? ['awaiting_purchase'] : appliedFilters.purchaseConfirmed ? ['purchase_confirmed'] : appliedFilters.readyForDelivery ? ['ready_for_delivery'] : undefined,
-    poType: appliedFilters.activeDelivery ? 'active-delivery' : undefined,
     inProcess: appliedFilters.inProcess || undefined,
     search: historySearchQuery || undefined,
   }), [appliedFilters, historySearchQuery]);
@@ -140,7 +139,7 @@ function HistoryView() {
                 onChange={(e) => {
                   const val = e.target.value;
                   setSelectedStatus(val);
-                  const reset = { completed: false, incomplete: false, activeDelivery: false, inProcess: false, awaitingPurchase: false, purchaseConfirmed: false, readyForDelivery: false, approved: false, pending: false, rejected: false };
+                  const reset = { completed: false, incomplete: false, onDelivery: false, inProcess: false, awaitingPurchase: false, purchaseConfirmed: false, readyForDelivery: false, approved: false, pending: false, rejected: false };
                   if (val) reset[val] = true;
                   setAppliedFilters(reset);
                 }}
@@ -151,7 +150,7 @@ function HistoryView() {
                   <>
                     <option value="completed">Completed</option>
                     <option value="incomplete">Incomplete</option>
-                    <option value="activeDelivery">Active Delivery</option>
+                    <option value="onDelivery">On Delivery</option>
                     <option value="inProcess">In Process</option>
                     <option value="awaitingPurchase">Awaiting Purchase</option>
                     <option value="purchaseConfirmed">Purchase Confirmed</option>

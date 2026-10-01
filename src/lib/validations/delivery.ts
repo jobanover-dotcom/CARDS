@@ -8,7 +8,9 @@ export const poStatusSchema = z.enum(poStatusValues)
 export const deliveryStatusSchema = z.enum(deliveryStatusValues)
 
 // Purchaser confirms what was actually purchased (per item, never overwrites qty).
-// Every line must be positively purchased: 0 < purchasedQty <= approved/ordered.
+// Partial purchasing is allowed: each call may cover a subset of lines, and
+// follow-up quantities stay on the SAME PO. Cap enforced server-side:
+// 0 < purchasedQty <= approved/ordered, cumulative total never exceeds approved.
 export const confirmPurchaseSchema = z.object({
   poNumber: z.string().min(1, 'PO number is required'),
   items: z
@@ -23,6 +25,31 @@ export const confirmPurchaseSchema = z.object({
 })
 
 export type ConfirmPurchaseInput = z.infer<typeof confirmPurchaseSchema>
+
+// Purchaser checkpoint: purchased items dispatched by supplier. Distinct from
+// ready_for_delivery (ready to be sent). Allowed even when partially purchased.
+export const markOnDeliverySchema = z.object({
+  poNumber: z.string().min(1, 'PO number is required'),
+})
+
+export type MarkOnDeliveryInput = z.infer<typeof markOnDeliverySchema>
+
+// Simplified warehouse receiving against PO items (NOT delivery tracking):
+// 0 <= receivedQty <= purchasedQty per item, plus optional remarks.
+export const confirmReceivingV2Schema = z.object({
+  poNumber: z.string().min(1, 'PO number is required'),
+  items: z
+    .array(
+      z.object({
+        poItemId: z.string().min(1),
+        receivedQty: z.number().int().min(0, 'Received quantity must be 0 or more'),
+      }),
+    )
+    .min(1, 'Every PO item must have a received quantity'),
+  remarks: z.string().max(2000).optional(),
+})
+
+export type ConfirmReceivingV2Input = z.infer<typeof confirmReceivingV2Schema>
 
 // Explicit readiness gate: purchase_confirmed → ready_for_delivery.
 export const markReadyForDeliverySchema = z.object({
