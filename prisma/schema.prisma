@@ -21,7 +21,10 @@ model PurchaseOrder {
   id String @id @default(uuid())
   date String
   poNumber String @unique
-  supplier String
+  // Procurement-owned, NOT set at PO creation. Recorded when the purchaser
+  // saves purchase quantities (see actions/procurement.ts savePurchase).
+  // Nullable because an approved requirement has no supplier yet.
+  supplier String?
   supplierAddress String?
   requisitioner String
   mrsNo String
@@ -32,9 +35,15 @@ model PurchaseOrder {
   approvedBy String?
   listedBy String?
   notes String?
-  status String @default("incomplete")
+  // Canonical lifecycle: awaiting_purchase -> in_progress -> completed
+  // (+ cancelled). Legacy values (incomplete, purchase_confirmed,
+  // ready_for_delivery, on_delivery) are read-only; see poLifecycle() in
+  // src/lib/deliveryStatus.ts. statusLabel is display-only and always
+  // derived from status by the UI, never trusted as stored.
+  status String @default("awaiting_purchase")
+  // @deprecated legacy category only; never a workflow or result state.
   poType String @default("active-delivery")
-  statusLabel String @default("Open")
+  statusLabel String @default("Awaiting Purchase")
   warehouse String
 
   monQtyRvd String?
@@ -49,13 +58,16 @@ model PurchaseOrder {
   profile Profile? @relation(fields: [profileId], references: [id])
   items PurchaseOrderItem[]
   monitoringItems PurchaseOrderMonitoringItem[]
+  // Historical shipment records. The active workflow no longer creates
+  // these — supplier delivery is external to CARDS. Read-only archive.
   deliveries Delivery[]
-  // V1 procurement workflow (status is canonical; poType is category only)
+  // First Save Purchase stamp (purchaser username).
   purchaseConfirmedAt DateTime?
   purchaseConfirmedBy String?
+  // @deprecated retired delivery gates. Never written by the current
+  // workflow; retained so historical rows keep their context.
   readyForDeliveryAt DateTime?
-  // Purchaser checkpoint: supplier has dispatched/is delivering purchased items.
-  // Distinct from ready_for_delivery (ready to be sent). Set via markOnDelivery.
+  // @deprecated retired "On Delivery" checkpoint. Retained for history only.
   onDeliveryAt DateTime?
   onDeliveryBy String?
   // Link to the source WarehouseRequest (reqNumber) for request-level
@@ -71,12 +83,15 @@ model PurchaseOrderItem {
   poNumber String
   po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
   itemDescription String
+  /// Approved quantity on this PO line (the snapshot the PO was raised for).
   qty Int
   unit String
-  // Actually purchased quantity (never overwrites qty); null until confirmPurchase
+  /// Cumulative quantity the purchaser has committed to buy so far. Never
+  /// overwritten: each Save Purchase / Follow-up Purchase raises the total,
+  /// capped at the approved quantity. Null until the first purchase.
   purchasedQty Int?
-  // Actually received quantity confirmed by Warehouse (simplified receiving,
-  // NOT delivery tracking). 0 until receiving; never exceeds purchasedQty.
+  /// Cumulative quantity the warehouse has physically received. Raised by
+  /// each receiving event, capped at purchasedQty. 0 until something arrives.
   receivedQty Int @default(0)
   // Optional link to the standardized Item Catalog entry.
   itemId String?
@@ -177,8 +192,13 @@ model ArchiveActivityLog {
   createdAt DateTime @default(now())
 }
 
-// V1 procurement → delivery → receiving (one PO → many deliveries).
-// Supplier stays outside the system; DeliveryReceipt stores Storage paths only.
+// Historical shipment records (DEL-xxxx). The active workflow does NOT create
+// these: supplier delivery is external to CARDS and the warehouse records
+// receiving directly against PurchaseOrderItem.receivedQty. Tables and rows
+// are preserved for historical record, reporting and archive viewing only.
+// DeliveryAuditLog is still the live PO workflow audit log: poNumber is
+// required and deliveryId is nullable, so purchase/receiving events are
+// recorded with deliveryId = null.
 model Delivery {
   id String @id @default(uuid())
   deliveryNumber String @unique
@@ -186,7 +206,8 @@ model Delivery {
   po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
   reqNumber String?
   supplier String
-  // for_delivery | in_transit | received | partially_received | discrepancy | completed
+  // Archive-only: for_delivery | in_transit | received | partially_received
+  // | discrepancy | completed
   status String @default("for_delivery")
   statusLabel String @default("For Delivery")
   deliveredBy String?
@@ -232,6 +253,10 @@ model DeliveryReceipt {
   @@index([deliveryId])
 }
 
+// Workflow audit log. Shared by the live procurement/receiving actions
+// (purchase_saved, supplier_changed, receiving_recorded, po_completed) and
+// the historical delivery archive. poNumber is always required; deliveryId is
+// null for non-delivery events.
 model DeliveryAuditLog {
   id String @id @default(uuid())
   deliveryId String?
