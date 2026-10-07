@@ -1,6 +1,6 @@
 'use server';
 
-import { prisma } from '@/lib/prisma';
+import { prisma, runTx } from '@/lib/prisma';
 import { getCurrentUser } from './auth';
 import { createAdminSupabase } from '@/lib/supabase-server';
 import { Prisma } from '@prisma/client';
@@ -76,7 +76,7 @@ export async function restoreArchive(id: string) {
   const uniquePos = Array.from(new Map(pos.map(p => [p.poNumber, p])).values());
   const uniqueReqs = Array.from(new Map(reqs.map(r => [r.reqNumber, r])).values());
 
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runTx(async (tx) => {
     const existingPoNumbers = new Set(
       (await tx.purchaseOrder.findMany({ where: { poNumber: { in: uniquePos.map(p => p.poNumber) } }, select: { poNumber: true } })).map(p => p.poNumber)
     );
@@ -157,7 +157,7 @@ export async function deleteWarehouseWithArchive(name: string) {
     }
   }
 
-  const { archivedPOs, archivedRequests, deletedUsers } = await prisma.$transaction(async (tx) => {
+  const { archivedPOs, archivedRequests, deletedUsers } = await runTx(async (tx) => {
     const pos = await tx.purchaseOrder.findMany({ where: { warehouse: name }, include: { items: true } });
     const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: name }, include: { items: true } });
 
@@ -200,7 +200,7 @@ export async function deleteArchiveEntry(id: string) {
   const entry = await prisma.warehouseArchive.findUnique({ where: { id } });
   if (!entry) throw new Error('Archive entry not found');
 
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runTx(async (tx) => {
     await tx.archiveActivityLog.deleteMany({ where: { warehouseName: entry.warehouseName } });
     await tx.warehouseArchive.delete({ where: { id: entry.id } });
   });
@@ -229,7 +229,7 @@ export async function systemReset() {
   let archived = 0;
 
   for (const wh of warehouses) {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await runTx(async (tx) => {
       const pos = await tx.purchaseOrder.findMany({ where: { warehouse: wh.name }, include: { items: true } });
       const reqs = await tx.warehouseRequest.findMany({ where: { warehouse: wh.name }, include: { items: true } });
       if (pos.length === 0 && reqs.length === 0) return null;
@@ -272,7 +272,7 @@ export async function systemReset() {
   ]);
 
   if (orphanPos.length > 0 || orphanReqs.length > 0) {
-    await prisma.$transaction(async (tx) => {
+    await runTx(async (tx) => {
       await tx.warehouseArchive.create({
         data: {
           warehouseName: '(Unassigned records)',

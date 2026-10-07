@@ -32,3 +32,6 @@ yarn-error.log*
 # env
 .env
 .opencode/
+
+# Live-DB backups created by scripts/backup-before-migration.mjs
+backups/

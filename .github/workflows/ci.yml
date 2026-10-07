@@ -105,9 +105,15 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
+      # `npm test` is the pure unit suite: no database access (verified by
+      # running it with an unreachable DATABASE_URL). The live-database E2E
+      # suite (`npm run test:e2e:live`) is deliberately NOT run here — it
+      # writes to the production database, and the suite additionally refuses to
+      # start when the CI env var is present.
       - name: Run tests
         run: npm test --if-present
         env:
+          CARDS_E2E_LIVE: ''
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

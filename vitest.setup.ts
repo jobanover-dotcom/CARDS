@@ -64,6 +64,22 @@ vi.mock('@/lib/prisma', () => ({
   },
 }))
 
+// jsdom implements neither IntersectionObserver nor ResizeObserver, which the
+// table's infinite-scroll sentinel constructs on mount. Without a stub any test
+// that renders a paginated table throws inside the sentinel and the whole tree
+// unmounts. A no-op observer is enough: tests drive loading explicitly.
+class NoopObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+  takeRecords() {
+    return [];
+  }
+}
+
+globalThis.IntersectionObserver ??= NoopObserver as unknown as typeof IntersectionObserver;
+globalThis.ResizeObserver ??= NoopObserver as unknown as typeof ResizeObserver;
+
 // Cleanup after each test
 afterEach(() => {
   cleanup()

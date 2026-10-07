@@ -1,455 +1,304 @@
 'use client';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import StatCard from '../ui/StatCard';
 import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
+import StatusBadge from '../ui/StatusBadge';
+import TableSkeleton from '../ui/TableSkeleton';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import POQuantityTracker from '../shared/POQuantityTracker';
-import MonitoringDetailsForm from './MonitoringDetailsForm';
-import ReceiveDeliveryForm from './ReceiveDeliveryForm';
-import CreateRequestModal from './CreateRequestModal';
-import StatusBadge from '../ui/StatusBadge';
-import PageSkeleton from '../ui/PageSkeleton';
-import TableScrollSentinel from '../ui/TableScrollSentinel';
+import ReceivePOForm from './ReceivePOForm';
+import {
+  actionPrimary,
+  actionSecondary,
+  metaLabel,
+  metaSub,
+  nestedPanel,
+  stripeAt,
+  tableEl,
+  tableScroller,
+  tableShell,
+  tdEl,
+  tdPrimary,
+  thEl,
+  thNumEl,
+  theadEl,
+  trEl,
+  trHover,
+  trSelected,
+} from '../ui/tableTheme';
 import { useWarehouseData } from '../../context/WarehouseDataContext';
-import { getPOs } from '../../../actions/pos';
-import { getDeliveries } from '../../../actions/deliveries';
-import { getFollowUpMap } from '../../../actions/requests';
-import { useInfiniteRows } from '../../hooks/useInfiniteRows';
+import { getPOWorkload } from '../../../actions/procurement';
 
-const OPEN_DELIVERY_STATUSES = ['for_delivery', 'in_transit', 'partially_received'];
+// Warehouse view. The warehouse owns RECEIVING only.
+//
+// The cards and the tables are fed from ONE server call (getPOWorkload), which
+// classifies every parent PO through the same canonical quantity chain the
+// rows display. That is deliberate: the old screen counted a card from one
+// source and filtered its table from another, so a card could read "4
+// partially received" above an empty table.
+//
+// There is no "Partially Received" card and no "Ready for Delivery" tab: what
+// remains is a quantity (receiving outstanding), not a state. There is also no
+// procurement Follow-Up button — chasing a purchase shortfall belongs to the
+// Admin, who performs a Follow-up Purchase on the same PO.
+const TABS = {
+  receiving: { label: 'Receiving Due', sub: 'Purchased items not yet fully received — click Receive to record what arrived' },
+  'in-progress': { label: 'In Progress', sub: 'Purchase orders still being purchased or received' },
+  completed: { label: 'Completed', sub: 'Every item fully purchased and fully received' },
+};
 
-// Legacy single-shot receiving applies only to old records that never entered
-// the V1 procurement workflow. New procurement states are read-only here;
-// warehouse acts on deliveries instead.
-function isLegacyReceivable(order) {
-  return order.status === 'incomplete' && order.poType === 'active-delivery';
-}
+const COLUMNS = ['PO date', 'PO number', 'MRS No.', 'Approved', 'Purchased', 'Received', 'To Receive', 'Supplier', 'Status', 'Action'];
+const COL_SPAN = COLUMNS.length;
+const NUMERIC_COLUMNS = ['Approved', 'Purchased', 'Received', 'To Receive'];
 
 function PurchaseOrdersView() {
-  const { completedCount, partiallyReceivedCount, openDeliveryCount: v1OpenCount, poVersion, getWarehouseV1Partials, getPOQuantityTracker } = useWarehouseData();
-  const [selectedPoType, setSelectedPoType] = useState('deliveries');
-  const [poSearchInput, setPoSearchInput] = useState('');
-  const [poSearchQuery, setPoSearchQuery] = useState('');
-  const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
-  const [showReceiptModal, setShowReceiptModal] = useState(false);
-  const [showMonitoringModal, setShowMonitoringModal] = useState(false);
-  const [selectedMonitoringPo, setSelectedMonitoringPo] = useState(null);
-  const [receiveDeliveryNumber, setReceiveDeliveryNumber] = useState(null);
-  const [openDeliveryCount, setOpenDeliveryCount] = useState(0);
-  const [v1Partials, setV1Partials] = useState([]);
-  const [v1PartialsError, setV1PartialsError] = useState(null);
+  const { poVersion, getPOTracker } = useWarehouseData();
+  const [tab, setTab] = useState('receiving');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [workload, setWorkload] = useState(null);
+  const [workloadError, setWorkloadError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [receivePoNumber, setReceivePoNumber] = useState(null);
   const [trackerPoNumber, setTrackerPoNumber] = useState(null);
   const [trackerData, setTrackerData] = useState(null);
-  const [trackerError, setTrackerError] = useState(null);
-
-  const isDeliveries = selectedPoType === 'deliveries';
-  const [followUpPoModal, setFollowUpPoModal] = useState(false);
-  const [poForFollowUp, setPoForFollowUp] = useState(null);
-  const [followUpBalance, setFollowUpBalance] = useState(null);
-  const [followUpMap, setFollowUpMap] = useState({});
+  const [receiptPo, setReceiptPo] = useState(null);
+  // One purchase order expanded at a time. The rows are per PO because that is
+  // the unit a purchase order IS: receiving is recorded against the PO, so one PO
+  // gets one Receive action no matter how many of its items are outstanding.
+  const [expandedPoNumber, setExpandedPoNumber] = useState(null);
 
   useEffect(() => {
-    const t = setTimeout(() => setPoSearchQuery(poSearchInput), 300);
+    const t = setTimeout(() => setSearchQuery(searchInput), 300);
     return () => clearTimeout(t);
-  }, [poSearchInput]);
+  }, [searchInput]);
 
-  const queryParams = useMemo(() => {
-    if (isDeliveries) return { statusIn: OPEN_DELIVERY_STATUSES };
-    // No 'active-delivery' tab: Open Deliveries is the single delivery-workload
-    // view. Legacy exception records (partially-received + discrepancy poType)
-    // stay visible together under Partially Received.
-    return {
-      ...(selectedPoType === 'completed'
-        ? { status: 'completed' }
-        : { status: 'incomplete', poTypeIn: ['partially-received', 'discrepancy'] }),
-      search: poSearchQuery || undefined,
-    };
-  }, [selectedPoType, poSearchQuery, isDeliveries]);
-
-  const fetcher = useMemo(() => (isDeliveries ? getDeliveries : getPOs), [isDeliveries]);
-
-  const { rows, total, initialLoading, loadingMore, hasMore, loadMore } =
-    useInfiniteRows(fetcher, queryParams, poVersion);
-  const purchaseOrders = isDeliveries ? [] : rows;
-  const deliveries = isDeliveries ? rows : [];
+  const loadWorkload = useCallback(async (params) => {
+    try {
+      setWorkload(await getPOWorkload(params));
+      setWorkloadError(null);
+    } catch (e) {
+      setWorkloadError(e?.message || 'Failed to load purchase orders');
+    } finally {
+      setLoading(false);
+    }
+  }, [getPOWorkload]);
 
   useEffect(() => {
     let cancelled = false;
-    getDeliveries({ statusIn: OPEN_DELIVERY_STATUSES, limit: 1 })
-      .then((res) => { if (!cancelled) setOpenDeliveryCount(res.total); })
-      .catch(() => {});
+    (async () => {
+      if (cancelled) return;
+      await loadWorkload({ search: searchQuery || undefined });
+    })();
     return () => { cancelled = true; };
-  }, [poVersion]);
+  }, [loadWorkload, searchQuery, poVersion]);
 
-  const displayOpenCount = v1OpenCount || openDeliveryCount;
+  // Rows come from the SAME workload object the cards count. One PO = one entry
+  // regardless of how many items it has.
+  const rows = useMemo(() => {
+    if (!workload) return [];
+    if (tab === 'receiving') return workload.receivingDue;
+    if (tab === 'completed') return workload.completed;
+    return workload.inProgress;
+  }, [workload, tab]);
 
-  const openTracker = (poNumber) => {
+  const toggleExpanded = (poNumber) =>
+    setExpandedPoNumber((current) => (current === poNumber ? null : poNumber));
+
+  // Switching section collapses, so an open PO is never inherited by a tab that
+  // may not even list it.
+  const selectTab = (next) => {
+    setTab(next);
+    setExpandedPoNumber(null);
+  };
+
+  const openTracker = async (poNumber) => {
     setTrackerPoNumber(poNumber);
     setTrackerData(null);
-    setTrackerError(null);
-    getPOQuantityTracker(poNumber)
-      .then((t) => setTrackerData(t))
-      .catch((e) => setTrackerError(e?.message || 'Failed to load tracker'));
-  };
-
-  useEffect(() => {
-    if (selectedPoType !== 'partially-received') return;
-    let cancelled = false;
-    // Server-computed V1 balances only — the UI never derives these itself.
-    getWarehouseV1Partials()
-      .then((rows) => { if (!cancelled) { setV1Partials(rows); setV1PartialsError(null); } })
-      .catch((e) => { if (!cancelled) setV1PartialsError(e?.message || 'Failed to load delivery shortfalls'); });
-    return () => { cancelled = true; };
-  }, [selectedPoType, poVersion, getWarehouseV1Partials]);
-
-  useEffect(() => {
-    const numbers = [...purchaseOrders.map((o) => o.poNumber), ...v1Partials.map((p) => p.poNumber)];
-    if (numbers.length === 0) return;
-    let cancelled = false;
-    getFollowUpMap(numbers, 'po')
-      .then((map) => { if (!cancelled) setFollowUpMap(map); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [purchaseOrders, v1Partials, poVersion]);
-
-  const handleOpenReceipt = (po) => {
-    setSelectedReceiptPo(po);
-    setShowReceiptModal(true);
-  };
-
-  const handleOpenMonitoring = (po) => {
-    setSelectedMonitoringPo(po);
-    setShowMonitoringModal(true);
-  };
-
-  const handleFileFollowUpFromPo = (po) => {
-    const totalOrdered = (po.items || []).reduce((s, it) => s + it.qty, 0);
-    const received = parseInt(po.monQtyRvd) || 0;
-    const shortfall = Math.max(0, totalOrdered - received);
-    if (shortfall > 0) {
-      setPoForFollowUp(po);
-      setFollowUpPoModal(true);
+    try {
+      setTrackerData(await getPOTracker(poNumber));
+    } catch (e) {
+      setTrackerData(null);
     }
   };
 
-  if (initialLoading) {
+  if (loading) {
     return (
-      <div className="bg-white rounded-lg p-6 text-left">
-        <PageSkeleton statCards={3} />
+      <div className="bg-white rounded-lg p-6">
+        <div className="mb-8">
+          <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Purchase Orders</h1>
+        </div>
+        <TableSkeleton columns={COLUMNS} />
       </div>
     );
   }
 
   return (
-    <div className="bg-white rounded-lg p-6 text-left">
+    <div className="bg-white rounded-lg p-6">
       <div className="mb-8">
         <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Purchase Orders</h1>
-        <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Manage and track material requisitions</p>
+        <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">
+          Confirm what physically arrived. Receiving records quantity only &mdash; the supplier delivers
+          outside CARDS.
+        </p>
       </div>
 
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
-        <div
-          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
-            selectedPoType === 'deliveries'
-              ? 'bg-gradient-to-br from-[#e0f2f1] to-[#b2dfdb] border-2 border-[#006680] shadow-[0_4px_16px_rgba(0,102,128,0.15)] scale-[1.02] -translate-y-1'
-              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#006680]'
-          }`}
-          onClick={() => setSelectedPoType('deliveries')}
-        >
-          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Open Deliveries</h3>
-          <div className="text-5xl font-bold text-[#006680]">{displayOpenCount}</div>
-        </div>
-        <div
-          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
-            selectedPoType === 'partially-received'
-              ? 'bg-gradient-to-br from-[#fff3e0] to-[#ffe0b2] border-2 border-[#ef6c00] shadow-[0_4px_16px_rgba(239,108,0,0.15)] scale-[1.02] -translate-y-1'
-              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#ef6c00]'
-          }`}
-          onClick={() => setSelectedPoType('partially-received')}
-        >
-          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Partially Received</h3>
-          <div className="text-5xl font-bold text-[#ef6c00]">{partiallyReceivedCount}</div>
-        </div>
-        <div
-          className={`border-2 rounded-xl p-8 text-center cursor-pointer transition-all duration-300 transform ${
-            selectedPoType === 'completed'
-              ? 'bg-gradient-to-br from-[#e3f2fd] to-[#bbdefb] border-2 border-[#1e3c72] shadow-[0_4px_16px_rgba(30,60,114,0.15)] scale-[1.02] -translate-y-1'
-              : 'bg-white border-2 border-[#e0e0e0] shadow-[0_2px_8px_rgba(0,0,0,0.06)] hover:border-[#1e3c72]'
-          }`}
-          onClick={() => setSelectedPoType('completed')}
-        >
-          <h3 className="m-0 text-sm text-[#666] font-semibold mb-3">Completed</h3>
-          <div className="text-5xl font-bold text-[#1e3c72]">{completedCount}</div>
-        </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] max-md:grid-cols-1 gap-5 mb-6">
+        <StatCard label={TABS.receiving.label} count={workload?.receivingDuePOs ?? 0} description="POs with units still to receive" color="tabBlue" isActive={tab === 'receiving'} onClick={() => selectTab('receiving')} />
+        <StatCard label={TABS['in-progress'].label} count={workload?.inProgressCount ?? 0} description="Open purchase orders" color="tabGreen" isActive={tab === 'in-progress'} onClick={() => selectTab('in-progress')} />
+        <StatCard label={TABS.completed.label} count={workload?.completedCount ?? 0} description="Fully purchased and received" color="tabGreen" isActive={tab === 'completed'} onClick={() => selectTab('completed')} />
       </div>
 
-      <div className="mt-8">
-        <div className="mb-4">
-          <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedPoType === 'completed' ? 'Completed' : selectedPoType === 'partially-received' ? 'Partially Received' : 'Open Deliveries'}
-          </h2>
-          <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedPoType === 'completed' ? 'Successful Deliveries' : selectedPoType === 'partially-received' ? 'Short deliveries ready for follow-up' : 'Shipments awaiting warehouse receiving — click a row to receive'}
-          </p>
-        </div>
+      <div className="mb-4">
+        <h2 className="m-0 text-lg text-[#333] font-bold">{TABS[tab].label}</h2>
+        <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">{TABS[tab].sub}</p>
+      </div>
 
-        <SearchInput
-          placeholder={isDeliveries ? 'Deliveries are listed newest first' : 'Search PO number...'}
-          value={poSearchInput}
-          onChange={(e) => setPoSearchInput(e.target.value)}
-          disabled={isDeliveries}
-        />
+      {workloadError && <p className="text-[13px] text-[#c62828]">{workloadError}</p>}
 
-        {isDeliveries ? (
-        <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-[13px]">
-              <thead className="bg-[#e0f2f1] sticky top-0 z-10">
-                <tr>
-                  {['Delivery No.', 'PO No.', 'Supplier', 'Supplier DR', 'Status', 'Items', 'Delivered', 'Received'].map((h, i) => (
-                    <th key={i} className="p-4 text-left font-bold text-[#006680] border-b border-[#006680]/20 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {deliveries.length > 0 ? (
-                  <>
-                    {deliveries.map((d, index) => {
-                      const items = d.items || [];
-                      const itemSummary = items.length ? `${items[0].poItem?.itemDescription || '—'}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
-                      const delivered = items.reduce((s, it) => s + it.deliveredQty, 0);
-                      const received = items.reduce((s, it) => s + it.receivedQty, 0);
-                      return (
-                      <tr key={d.id || index}
-                        onClick={() => setReceiveDeliveryNumber(d.deliveryNumber)}
-                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer hover:bg-[#e0f2f1]/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">
-                          <a
-                            href={`/warehouse/deliveries/${d.deliveryNumber}`}
-                            onClick={(e) => e.stopPropagation()}
-                            className="text-[#006680] font-semibold"
-                          >
-                            {d.deliveryNumber}
-                          </a>
-                        </td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{d.poNumber}</td>
-                        <td className="p-4 text-[#333] font-medium">{d.supplier}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{d.supplierDrNumber || '—'}</td>
-                        <td className="p-4 whitespace-nowrap"><StatusBadge status={d.statusLabel || d.status} /></td>
-                        <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{delivered}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{received}</td>
-                      </tr>
-                      );
-                    })}
-                    <TableScrollSentinel colSpan={8} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
-                  </>
-                ) : (
-                  <EmptyState colSpan={8} message="No open deliveries" />
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        ) : (
-        <>
-        {selectedPoType === 'partially-received' && (
-        <div className="mt-4 border border-[#ffcc80] rounded-lg overflow-hidden mb-4">
-          <div className="bg-[#fff8e1] px-4 py-2 text-[12px] font-bold text-[#8d6e00]">Delivery shortfalls — quantities from delivery records (Requested → Approved → Purchased → Delivered → Received)</div>
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-[13px]">
-              <thead className="bg-[#fff3e0] sticky top-0 z-10">
-                <tr>
-                  {['PO number', 'Item', 'Requested', 'Approved', 'Purchased', 'Delivered', 'Received', 'Outstanding', 'Action'].map((h, i) => (
-                    <th key={i} className="p-4 text-left font-bold text-[#ef6c00] border-b border-[#ef6c00]/20 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {v1PartialsError ? (
-                  <tr><td colSpan={9} className="p-4 text-[#c62828] text-xs font-semibold">{v1PartialsError}</td></tr>
-                ) : v1Partials.length === 0 ? (
-                  <EmptyState colSpan={9} message="No delivery shortfalls" />
-                ) : (
-                  v1Partials.map((p) => {
-                    const followUps = followUpMap[p.poNumber] || [];
-                    const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
-                    const rows = p.items.filter((it) => it.requestOutstanding > 0);
-                    return rows.map((it, idx) => (
-                      <tr key={`${p.poNumber}-${it.poItemId}`} onClick={() => openTracker(p.poNumber)} className={`border-b border-gray-200 cursor-pointer hover:bg-[#fff8e1]/60 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                        {idx === 0 && (
-                          <td rowSpan={rows.length} className="p-4 text-[#333] font-bold whitespace-nowrap align-top">{p.poNumber}<div className="text-[10px] font-normal text-[#999]">{p.supplier}</div></td>
-                        )}
-                        <td className="p-4 text-[#333] font-medium">{it.itemDescription}<div className="text-[10px] text-[#999]">{it.statusReason || `shortfall: ${it.shortfallSource}`}</div></td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.requestedQty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.approvedQty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.purchasedQty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.deliveredQty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{it.receivedQty}</td>
-                        <td className="p-4 font-bold text-[#e65100] whitespace-nowrap">{it.requestOutstanding}</td>
-                        {idx === 0 && (
-                          <td rowSpan={rows.length} className="p-4 align-top">
-                            {!blocking ? (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPoForFollowUp({ poNumber: p.poNumber });
-                                  setFollowUpBalance({ poNumber: p.poNumber, items: rows.filter((r) => r.procurementShortfall > 0).map((r) => ({ itemDescription: r.itemDescription, unit: r.unit, maxQty: r.procurementShortfall })) });
-                                  setFollowUpPoModal(true);
-                                }}
-                                disabled={!rows.some((r) => r.procurementShortfall > 0)}
-                                title={rows.some((r) => r.procurementShortfall > 0) ? 'Procurement follow-up capped at approved-minus-purchased' : 'No procurement shortfall — remaining units are already purchased'}
-                                className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00] disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                File Follow-Up
+      <SearchInput placeholder="Search PO number, item or supplier..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+
+      <div className={`mt-4 ${tableShell}`}>
+        <div className={tableScroller}>
+          <table className={`${tableEl} min-w-[1100px]`}>
+            <thead className={theadEl}>
+              <tr>
+                {COLUMNS.map((h) => (
+                  <th key={h} className={NUMERIC_COLUMNS.includes(h) ? thNumEl : thEl}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length > 0 ? (
+                <>
+                  {rows.map((po, index) => {
+                    const expanded = expandedPoNumber === po.poNumber;
+                    const t = po.totals ?? {};
+                    return (
+                      <React.Fragment key={po.poNumber}>
+                        <tr
+                          onClick={() => toggleExpanded(po.poNumber)}
+                          aria-expanded={expanded}
+                          title={expanded ? 'Collapse purchase order' : 'Expand to see its items'}
+                          className={`${trEl} ${trHover} cursor-pointer ${expanded ? trSelected : stripeAt(index)}`}
+                        >
+                          <td className="p-4 whitespace-nowrap">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[#bbb] text-[10px] leading-none" aria-hidden="true">{expanded ? '\u25be' : '\u25b8'}</span>
+                              <span className={metaSub}>{po.date}</span>
+                            </div>
+                          </td>
+                          <td className={`${tdPrimary} whitespace-nowrap`}>{po.poNumber}</td>
+                          <td className={`${tdEl} whitespace-nowrap`}>{po.mrsNo}</td>
+                          <td className="p-4 text-[#333] text-right tabular-nums">{t.approved}</td>
+                          <td className="p-4 text-[#333] text-right tabular-nums">{t.purchased}</td>
+                          <td className="p-4 text-[#333] text-right tabular-nums">{t.received}</td>
+                          <td className={`p-4 text-right tabular-nums font-bold ${t.receivingOutstanding ? 'text-[#006680]' : 'text-[#2e7d32]'}`}>
+                            {t.receivingOutstanding}
+                          </td>
+                          <td className={tdEl}>{po.supplier || <span className="text-[#bbb]">&mdash;</span>}</td>
+                          <td className="p-4 whitespace-nowrap"><StatusBadge status={po.statusLabel} /></td>
+                          <td className="p-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                            {po.receivingDue ? (
+                              <button onClick={() => setReceivePoNumber(po.poNumber)} className={actionPrimary}>
+                                Receive
                               </button>
                             ) : (
-                              <span className="inline-block px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-100 text-[#888] border border-gray-200 cursor-not-allowed">
-                                Follow-up {blocking.status === 'Pending' ? 'pending' : 'approved'}: {blocking.mrsNo}
-                              </span>
+                              <button onClick={() => setTrackerPoNumber(po.poNumber)} className={actionPrimary}>
+                                View
+                              </button>
                             )}
-                          </td>
-                        )}
-                      </tr>
-                    ));
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        )}
-        {selectedPoType !== 'partially-received' && (
-        <div className="mt-4 border border-[#e0e0e0] rounded-lg overflow-hidden">
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-[13px]">
-              <thead className="bg-[#e3f2fd] sticky top-0 z-10">
-                <tr>
-                  {['PO date', 'PO number', 'Item Description', 'Qty', 'Unit', 'Supplier Name', 'MRS No.', 'PO rvd date', 'Pick-up by', ...(selectedPoType === 'partially-received' ? ['Action'] : [])].map((h, i) => (
-                    <th key={i} className="p-4 text-left font-bold text-[#1e3c72] border-b border-[#1e3c72]/20 whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {purchaseOrders.length > 0 ? (
-                  <>
-                    {purchaseOrders.map((order, index) => {
-                      const items = order.items || [];
-                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
-                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
-                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
-                      const followUps = followUpMap[order.poNumber] || [];
-                      const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
-                      const lastRejected = !blocking && followUps.length > 0 ? followUps[0] : null;
-                      return (
-                      <tr key={index}
-                        onClick={() => {
-                          // Phase 14: legacy receiving only for old records outside the V1 workflow.
-                          if (isLegacyReceivable(order)) {
-                            handleOpenMonitoring(order);
-                          } else {
-                            handleOpenReceipt(order);
-                          }
-                        }}
-                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer hover:bg-[#f0f8fc]/50 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                        <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{totalQty}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{unitSummary}</td>
-                        <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
-                        <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
-                        {selectedPoType === 'partially-received' && (
-                        <td className="p-4">
-                          {order.status === 'incomplete' && order.poType === 'partially-received' && !blocking && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleFileFollowUpFromPo(order);
-                              }}
-                              className="bg-white text-[#ef6c00] border border-[#ffcc80] px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fff3e0] hover:border-[#ef6c00]"
-                            >
-                              File Follow-Up
+                            <button onClick={() => openTracker(po.poNumber)} className={`${actionSecondary} ml-2`}>
+                              Track
                             </button>
-                          )}
-                          {blocking && (
-                            <span
-                              className="inline-block px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-100 text-[#888] border border-gray-200 cursor-not-allowed"
-                              title={blocking.status === 'Pending' ? 'Awaiting purchaser decision — refiling is blocked until decided' : 'Shortfall already covered by this follow-up'}
-                            >
-                              Follow-up {blocking.status === 'Pending' ? 'pending' : 'approved'}: {blocking.mrsNo}
-                            </span>
-                          )}
-                          {lastRejected && (
-                            <div className="mt-1 text-[10px] text-[#999]">Last follow-up {lastRejected.mrsNo} rejected — you may refile</div>
-                          )}
-                        </td>
+                          </td>
+                        </tr>
+
+                        {expanded && (
+                          <tr className={`${trEl} ${nestedPanel}`}>
+                            <td colSpan={COL_SPAN} className="p-0">
+                              <div className="px-5 py-4">
+                                <h3 className={`m-0 mb-1 ${metaLabel}`}>THIS PURCHASE ORDER</h3>
+                                <p className="mt-0 mb-3 text-[11px] text-[#888]">
+                                  Receiving is recorded against this purchase order, capped at what was bought
+                                  for it. A purchase order can carry several items.
+                                </p>
+                                {/* The shared item tracker, in its warehouse shape. This
+                                    table used to be written out here, and a second time
+                                    in the tracker modal below. */}
+                                <POQuantityTracker
+                                  variant="receiving"
+                                  tracker={{ poNumber: po.poNumber, items: po.itemLines ?? [], totals: po.totals }}
+                                />
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                      </tr>
+                      </React.Fragment>
                     );
-                    })}
-                    <TableScrollSentinel colSpan={selectedPoType === 'partially-received' ? 10 : 9} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
-                  </>
-                ) : (
-                  <EmptyState colSpan={selectedPoType === 'partially-received' ? 10 : 9} message="No purchase orders found" />
-                )}
-              </tbody>
-            </table>
+                  })}
+                </>
+              ) : (
+                <EmptyState
+                  colSpan={COL_SPAN}
+                  message={tab === 'receiving' ? 'Nothing is waiting to be received' : 'No purchase orders found'}
+                  hint={searchQuery ? `Nothing matches "${searchQuery}". Clear the search to see every purchase order.` : null}
+                />
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p className="mt-2 text-right text-xs text-[#999]">
+        {tab === 'receiving'
+          ? `${workload?.receivingDuePOs ?? 0} purchase order(s) awaiting receiving`
+          : `${rows.length} purchase order(s)`}
+      </p>
+
+      {receivePoNumber && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] overflow-y-auto py-6 px-4">
+          <div className="bg-white rounded-xl w-full max-w-[640px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+            <ReceivePOForm poNumber={receivePoNumber} onClose={() => setReceivePoNumber(null)} />
           </div>
         </div>
-        )}
-        </>
-        )}
-        <p className="mt-2 text-right text-xs text-[#999]">Loaded {isDeliveries ? deliveries.length : purchaseOrders.length} of {total} {isDeliveries ? 'deliveries' : 'purchase orders'}</p>
-      </div>
-
-      {receiveDeliveryNumber && (
-        <ReceiveDeliveryForm
-          deliveryNumber={receiveDeliveryNumber}
-          onClose={() => setReceiveDeliveryNumber(null)}
-        />
-      )}
-
-      {showReceiptModal && selectedReceiptPo && (
-        <MaterialRequestReceipt po={selectedReceiptPo} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
-      )}
-
-      {showMonitoringModal && selectedMonitoringPo && (
-        <MonitoringDetailsForm
-          po={selectedMonitoringPo}
-          onClose={() => { setShowMonitoringModal(false); setSelectedMonitoringPo(null); }}
-        />
-      )}
-
-      {followUpPoModal && poForFollowUp && (
-        <CreateRequestModal
-          followUpPo={poForFollowUp}
-          followUpBalance={followUpBalance}
-          onClose={() => {
-            setFollowUpPoModal(false);
-            setPoForFollowUp(null);
-            setFollowUpBalance(null);
-          }}
-        />
       )}
 
       {trackerPoNumber && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] overflow-y-auto py-6 px-4">
-          <div className="bg-white rounded-xl w-full max-w-[720px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
-            <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5">
-              <h2 className="m-0 text-lg font-bold text-[#333]">Quantity Tracker — {trackerPoNumber}</h2>
+          <div className="bg-white rounded-xl w-full max-w-[640px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] p-6 text-left">
+            <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-4">
+              <h2 className="m-0 text-lg font-bold text-[#333]">Quantity Tracker &mdash; {trackerPoNumber}</h2>
               <button className="text-2xl text-[#888]" onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }}>&times;</button>
             </div>
-            {trackerError && <p className="text-[13px] text-[#c62828]">{trackerError}</p>}
-            {!trackerError && <POQuantityTracker tracker={trackerData} variant="warehouse" />}
-            <div className="flex justify-end mt-4 pt-4 border-t border-[#eee]">
-              <button onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }} className="py-2.5 px-6 bg-white text-[#333] border border-[#ccc] rounded-md">Close</button>
+            {trackerData ? (
+              <>
+                {/* Read straight off the tracker payload; nothing is derived here. */}
+                <p className="m-0 mb-3 text-[12px] text-[#666]">
+                  <span className="font-bold">PO </span>{trackerData.poNumber}
+                  {' '}&middot; <span className="font-bold">Supplier </span>{trackerData.supplier || '—'}
+                  {' '}&middot; <span className="font-bold">Status </span>{trackerData.statusLabel}
+                </p>
+                <POQuantityTracker variant="receiving" tracker={trackerData} />
+              </>
+            ) : (
+              <p className="text-[13px] text-[#666]">Loading…</p>
+            )}
+            <div className="flex justify-end gap-3 mt-4 pt-4 border-t border-[#eee]">
+              <button onClick={() => { setTrackerPoNumber(null); setTrackerData(null); }} className={`${actionSecondary} py-2.5 px-6`}>Close</button>
+              <button
+                onClick={() => { const n = trackerPoNumber; setTrackerPoNumber(null); setTrackerData(null); setReceivePoNumber(n); }}
+                className="py-2.5 px-6 bg-[#006680] text-white rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#00536b]"
+              >
+                Record Receiving
+              </button>
             </div>
           </div>
         </div>
+      )}
+
+      {receiptPo && (
+        <MaterialRequestReceipt po={receiptPo} onClose={() => setReceiptPo(null)} />
       )}
     </div>
   );

@@ -1,16 +1,31 @@
 'use client';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import StatusBadge from '../ui/StatusBadge';
 import EmptyState from '../ui/EmptyState';
-import PageSkeleton from '../ui/PageSkeleton';
+import TableSkeleton from '../ui/TableSkeleton';
+import {
+  selectEl,
+  stripeAt,
+  tableEl,
+  tableScroller,
+  tableShell,
+  tdEl,
+  tdNum,
+  tdPrimary,
+  thEl,
+  thNumEl,
+  theadEl,
+  trEl,
+  trHover,
+} from '../ui/tableTheme';
 import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity, deleteArchiveEntry } from '../../../actions/archive';
 import ExcelJS from 'exceljs';
 
-const ACTION_BADGES = {
-  archived: 'bg-red-50 text-red-700 border-red-300',
-  restored: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
-  downloaded: 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
-};
+const ENTRY_COLUMNS = ['Warehouse Name', 'Date of Clearing', 'Type', '# Purchase Orders', '# Requests'];
+const ENTRY_SPAN = ENTRY_COLUMNS.length;
+const ACTIVITY_COLUMNS = ['Date & Time', 'Warehouse', 'Action', 'Details', 'By'];
+const ACTIVITY_SPAN = ACTIVITY_COLUMNS.length;
 
 function ArchiveView() {
   const { user } = useAuth();
@@ -165,31 +180,25 @@ function ArchiveView() {
     }
   };
 
-  if (initialLoading) {
-    return (
-      <div className="bg-white rounded-lg p-6 text-left">
-        <PageSkeleton statCards={0} />
-      </div>
-    );
-  }
-
   return (
     <div className="bg-white rounded-lg p-6 text-left">
-      <div className="flex items-start justify-between mb-8 max-md:flex-col max-md:gap-4">
-        <div>
-          <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Archive</h1>
-          <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Cleared and deleted warehouse records — restore or download anytime</p>
+      <div className="mb-8">
+        <div className="flex items-start justify-between max-md:flex-col max-md:gap-4">
+          <div>
+            <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Archive</h1>
+            <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Cleared and deleted warehouse records — restore or download anytime</p>
+          </div>
+          <button
+            onClick={() => setShowActivityLog(true)}
+            className="bg-[#1e3c72] text-white border-none py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#2a5298] hover:shadow-[0_2px_8px_rgba(30,60,114,0.3)] whitespace-nowrap"
+          >
+            Activity Log
+          </button>
         </div>
-        <button
-          onClick={() => setShowActivityLog(true)}
-          className="bg-[#1e3c72] text-white border-none py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer transition-all duration-200 hover:bg-[#2a5298] hover:shadow-[0_2px_8px_rgba(30,60,114,0.3)] whitespace-nowrap"
-        >
-          Activity Log
-        </button>
       </div>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="p-2 border border-gray-300 rounded-md bg-white text-[13px]">
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className={selectEl} aria-label="Filter archives by type">
           <option value="all">All Types</option>
           <option value="deleted">Deleted Warehouse</option>
           <option value="reset">Cleared (Reset)</option>
@@ -197,7 +206,8 @@ function ArchiveView() {
         <select
           value={yearFilter}
           onChange={(e) => { setYearFilter(e.target.value); setMonthFilter(''); }}
-          className="p-2 border border-gray-300 rounded-md bg-white text-[13px]"
+          className={selectEl}
+          aria-label="Filter archives by year"
         >
           <option value="">All Years</option>
           {years.map(y => <option key={y} value={y}>{y}</option>)}
@@ -206,7 +216,8 @@ function ArchiveView() {
           value={monthFilter}
           onChange={(e) => setMonthFilter(e.target.value)}
           disabled={!yearFilter}
-          className={`p-2 border border-gray-300 rounded-md bg-white text-[13px] ${!yearFilter ? 'opacity-50 cursor-not-allowed' : ''}`}
+          className={selectEl}
+          aria-label="Filter archives by month"
         >
           <option value="">Whole Year</option>
           {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
@@ -224,41 +235,47 @@ function ArchiveView() {
         <div className="mb-4 p-3 bg-[#ffebee] text-[#c62828] border border-[#ef9a9a] rounded-md text-[13px]">{error}</div>
       )}
 
-      <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
-        <table className="w-full min-w-[700px] border-collapse text-[13px]">
-          <thead>
-            <tr>
-              {['Warehouse Name', 'Date of Clearing', 'Type', '# Purchase Orders', '# Requests'].map((h, i) => (
-                <th key={i} className="bg-gradient-to-r from-[#ede7f6] to-[#d1c4e9] p-4 text-left font-bold text-[#4527a0] border-b-2 border-[#4527a0]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {filteredEntries.length > 0 ? filteredEntries.map((e, index) => (
-              <tr
-                key={e.id}
-                onClick={() => setSelectedEntry(e)}
-                className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'} hover:bg-[#f5f0fa]/60`}
-              >
-                <td className="p-4">
-                  <span className="text-[#333] font-semibold">{e.warehouseName}</span>
-                </td>
-                <td className="p-4 text-[#333]">
-                  {new Date(e.clearedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                </td>
-                <td className="p-4">
-                  <span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${e.reason === 'deleted' ? 'bg-red-50 text-red-700 border-red-300' : 'bg-[#fff3e0] text-[#ef6c00] border-[#ffcc80]'}`}>
-                    {e.reason === 'deleted' ? 'Deleted' : 'Cleared'}
-                  </span>
-                </td>
-                <td className="p-4 text-[#333]">{e.poCount}</td>
-                <td className="p-4 text-[#333]">{e.requestCount}</td>
-              </tr>
-            )) : (
-              <EmptyState colSpan={5} message="No archived entries yet" />
-            )}
-          </tbody>
-        </table>
+      <div className={tableShell}>
+        {initialLoading ? (
+          <TableSkeleton columns={ENTRY_COLUMNS} rows={4} />
+        ) : (
+          <div className={tableScroller}>
+            <table className={`${tableEl} min-w-[720px]`}>
+              <thead className={theadEl}>
+                <tr>
+                  {ENTRY_COLUMNS.map((h) => (
+                    <th key={h} className={['# Purchase Orders', '# Requests'].includes(h) ? thNumEl : thEl}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filteredEntries.length > 0 ? filteredEntries.map((e, index) => (
+                  <tr
+                    key={e.id}
+                    onClick={() => setSelectedEntry(e)}
+                    className={`${trEl} ${trHover} cursor-pointer ${stripeAt(index)}`}
+                  >
+                    <td className={`${tdPrimary} whitespace-nowrap`}>{e.warehouseName}</td>
+                    <td className={`${tdEl} whitespace-nowrap`}>
+                      {new Date(e.clearedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </td>
+                    <td className="p-4 whitespace-nowrap">
+                      <StatusBadge status={e.reason === 'deleted' ? 'Deleted' : 'Cleared'} />
+                    </td>
+                    <td className={tdNum}>{e.poCount}</td>
+                    <td className={tdNum}>{e.requestCount}</td>
+                  </tr>
+                )) : (
+                  <EmptyState
+                    colSpan={ENTRY_SPAN}
+                    message="No archived entries yet"
+                    hint={typeFilter !== 'all' || yearFilter ? 'Clear the filters above to see every archive entry.' : 'Clearing or deleting a warehouse will record it here.'}
+                  />
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {showActivityLog && (
@@ -269,33 +286,29 @@ function ArchiveView() {
               <button className="bg-none border-none text-2xl cursor-pointer text-[#888] hover:text-[#333] transition-colors duration-200 p-1 leading-none" onClick={() => setShowActivityLog(false)}>&times;</button>
             </div>
             <p className="mt-0 mx-0 mb-4 text-xs text-[#999]">Permanent record — kept even after system resets</p>
-            <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
-              <div className="overflow-x-auto overflow-y-auto max-h-[60vh]">
-                <table className="w-full min-w-[700px] border-collapse text-[13px]">
-                  <thead>
+            <div className={tableShell}>
+              <div className="overflow-x-auto max-h-[60vh]">
+                <table className={`${tableEl} min-w-[700px]`}>
+                  <thead className={theadEl}>
                     <tr>
-                      {['Date & Time', 'Warehouse', 'Action', 'Details', 'By'].map((h, i) => (
-                        <th key={i} className="bg-gradient-to-r from-[#f0f4f8] to-[#dce6f0] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 sticky top-0 z-10 whitespace-nowrap">{h}</th>
+                      {ACTIVITY_COLUMNS.map((h) => (
+                        <th key={h} className={thEl}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {activity.length > 0 ? activity.map((a, index) => (
-                      <tr key={a.id} className={`border-b border-gray-200 ${index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}`}>
-                        <td className="p-4 text-[#333] whitespace-nowrap">
+                      <tr key={a.id} className={`${trEl} ${stripeAt(index)}`}>
+                        <td className={`${tdEl} whitespace-nowrap`}>
                           {new Date(a.createdAt).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                         </td>
-                        <td className="p-4 text-[#333] font-semibold">{a.warehouseName}</td>
-                        <td className="p-4">
-                          <span className={`px-3 py-1 rounded-full text-[11px] font-bold border ${ACTION_BADGES[a.action] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
-                            {a.action}
-                          </span>
-                        </td>
-                        <td className="p-4 text-[#555]">{a.detail || '—'}</td>
-                        <td className="p-4 text-[#333]">{a.actor || '—'}</td>
+                        <td className={`${tdPrimary} whitespace-nowrap`}>{a.warehouseName}</td>
+                        <td className="p-4 whitespace-nowrap"><StatusBadge status={a.action} /></td>
+                        <td className={tdEl}>{a.detail || <span className="text-[#bbb]">&mdash;</span>}</td>
+                        <td className={`${tdEl} whitespace-nowrap`}>{a.actor || <span className="text-[#bbb]">&mdash;</span>}</td>
                       </tr>
                     )) : (
-                      <EmptyState colSpan={5} message="No archive activity yet" />
+                      <EmptyState colSpan={ACTIVITY_SPAN} message="No archive activity yet" />
                     )}
                   </tbody>
                 </table>

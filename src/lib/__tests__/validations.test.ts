@@ -42,13 +42,12 @@ describe('requestSchema', () => {
   })
 })
 
+// A PO carries a parent record with one or more items, and NO supplier: the
+// supplier belongs to the procurement act, not to the approved requirement.
 const validPO = {
   date: '2026-09-03',
   poNumber: 'PO-001',
-  itemDescription: 'Steel bars',
-  qty: 100,
-  unit: 'pcs',
-  supplier: 'Acme Supplies',
+  items: [{ itemDescription: 'Steel bars', qty: 100, unit: 'pcs' }],
   requisitioner: 'Jane Doe',
   mrsNo: 'MRS-002',
   warehouse: 'Main',
@@ -57,9 +56,27 @@ const validPO = {
 describe('purchaseOrderSchema', () => {
   it('accepts a valid purchase order with defaults', () => {
     const parsed = purchaseOrderSchema.parse(validPO)
-    expect(parsed.status).toBe('incomplete')
+    expect(parsed.status).toBe('awaiting_purchase')
     expect(parsed.poType).toBe('active-delivery')
-    expect(parsed.statusLabel).toBe('Open')
+    expect(parsed.statusLabel).toBe('Awaiting Purchase')
+  })
+
+  it('requires at least one item', () => {
+    expect(() => purchaseOrderSchema.parse({ ...validPO, items: [] })).toThrow()
+  })
+
+  it('rejects a negative item quantity', () => {
+    expect(() =>
+      purchaseOrderSchema.parse({ ...validPO, items: [{ itemDescription: 'Steel bars', qty: 0, unit: 'pcs' }] }),
+    ).toThrow()
+  })
+
+  it('accepts the retired status values for historical compatibility', () => {
+    // Legacy rows may still carry these; the schema must read them without
+    // pretending they are current workflow states.
+    for (const status of ['incomplete', 'purchase_confirmed', 'ready_for_delivery', 'on_delivery']) {
+      expect(purchaseOrderSchema.parse({ ...validPO, status }).status).toBe(status)
+    }
   })
 
   it('rejects missing warehouse', () => {

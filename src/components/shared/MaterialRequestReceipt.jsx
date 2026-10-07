@@ -1,33 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { poDisplayLabel, poLifecycle } from '../../lib/deliveryStatus';
 
+// The receipt renders the CANONICAL lifecycle, derived from the stored status
+// through poLifecycle(). It never reads the stored statusLabel (which can go
+// stale) and never treats a legacy poType as a workflow state.
 function getStatusDisplay(po) {
-  if (po.statusLabel) {
-    return po.statusLabel;
-  }
-  if (po.status === 'completed') {
-    return 'Completed';
-  }
-  if (po.poType === 'active-delivery') {
-    return 'Active Delivery';
-  }
-  if (po.poType === 'discrepancy') {
-    return 'Discrepancy';
-  }
-  return 'Open';
+  return poDisplayLabel(po.status);
 }
 
 function getStatusColor(po) {
-  if (po.status === 'completed') {
-    return { bg: 'bg-[#e8f5e9]', text: 'text-[#2e7d32]', border: 'border-[#a5d6a7]' };
+  switch (poLifecycle(po.status)) {
+    case 'completed':
+      return { bg: 'bg-[#e8f5e9]', text: 'text-[#2e7d32]', border: 'border-[#a5d6a7]' };
+    case 'in_progress':
+      return { bg: 'bg-[#e3f2fd]', text: 'text-[#1e3c72]', border: 'border-[#90caf9]' };
+    case 'cancelled':
+      return { bg: 'bg-gray-100', text: 'text-gray-500', border: 'border-gray-300' };
+    default:
+      return { bg: 'bg-[#fff9e6]', text: 'text-[#f57f17]', border: 'border-[#ffb74d]' };
   }
-  if (po.poType === 'active-delivery') {
-    return { bg: 'bg-[#e3f2fd]', text: 'text-[#1e3c72]', border: 'border-[#90caf9]' };
-  }
-  if (po.poType === 'discrepancy') {
-    return { bg: 'bg-[#fef5f5]', text: 'text-[#c62828]', border: 'border-[#f44336]' };
-  }
-  return { bg: 'bg-[#fff9e6]', text: 'text-[#f57f17]', border: 'border-[#ffb74d]' };
 }
 
 function parsePoDate(dateStr) {
@@ -257,9 +249,11 @@ function MaterialRequestReceipt({ po, onClose, onDelete }) {
           </div>
         </div>
 
-        {po.status === 'completed' && (
+        {/* Legacy single-shot receiving block. Only rendered for records that
+            actually carry legacy monitoring data, never fabricated. */}
+        {(po.monQtyRvd || po.monDeliveredBy || po.monReferenceNo) && (
           <div className="mt-6 pt-6 border-t border-dashed border-gray-300">
-            <h3 className="m-0 text-[10px] font-extrabold text-[#777] tracking-widest uppercase mb-3 text-left">MONITORING DETAILS</h3>
+            <h3 className="m-0 text-[10px] font-extrabold text-[#777] tracking-widest uppercase mb-3 text-left">MONITORING DETAILS (LEGACY)</h3>
             <div className="grid grid-cols-2 gap-x-4 gap-y-3.5 text-left bg-gray-50 border border-gray-200 rounded-lg p-4 text-[11px] leading-tight">
               <div className="flex flex-col gap-0.5">
                 <span className="text-[#888] font-bold text-[9px] uppercase">PO number:</span>

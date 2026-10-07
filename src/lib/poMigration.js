@@ -1,20 +1,23 @@
-// Pure legacy → V1 PO mapping for the backfill script.
+// Pure legacy → procurement PO mapping for the backfill script.
 // Rule: only POs with NO receiving activity move to the new workflow.
 // Anything with monitoring rows, monDeliveredBy, or a terminal state stays
 // untouched on the legacy updatePOMonitoring() compat path — no blind moves,
 // no overwritten quantities. purchasedQty is never backfilled (the purchaser
-// confirms it via confirmPurchase()).
+// records it via savePurchase()).
 
 export const V1_AWAITING_PURCHASE = {
   status: 'awaiting_purchase',
   statusLabel: 'Awaiting Purchase',
 };
 
-export const V1_PO_STATUSES = ['awaiting_purchase', 'purchase_confirmed', 'ready_for_delivery'];
+// Statuses owned by the current procurement workflow. The legacy single-shot
+// receiving path (updatePOMonitoring) refuses to touch any of these, so the
+// two paths can never fight over the same row.
+export const V1_PO_STATUSES = ['awaiting_purchase', 'in_progress', 'completed'];
 
-// True when a PO has entered the V1 procurement → delivery → receiving
-// workflow. Shared by the backfill mapper and the legacy-path guards in
-// actions/pos.ts so both use one definition of "owned by the new workflow".
+// True when a PO is owned by the current procurement workflow. Shared by the
+// backfill mapper and the legacy-path guards in actions/pos.ts so both use
+// one definition of "owned by the new workflow".
 export function isV1WorkflowPO(po) {
   if (!po) return false;
   if (V1_PO_STATUSES.includes(po.status)) return true;

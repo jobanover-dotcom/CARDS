@@ -1,76 +1,88 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, updatePOMonitoring as updatePOMonitoringServer, updatePO as updatePOServer } from '../../actions/pos';
-import { confirmReceiving as confirmReceivingServer, getPOFollowUpBalance as getPOFollowUpBalanceServer, getPOQuantityTracker as getPOQuantityTrackerServer, getV1WarehouseStats as getV1WarehouseStatsServer, getWarehouseV1Partials as getWarehouseV1PartialsServer } from '../../actions/deliveries';
+import { recordReceiving as recordReceivingServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer } from '../../actions/procurement';
 import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
 
+const EMPTY_STATS = { totalPOs: 0, completedPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, unifiedDiscrepancyCount: 0 };
+const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0 };
+
 export function WarehouseDataProvider({ children }) {
-  const [stats, setStats] = useState({ totalPOs: 0, completedPOs: 0, incompletePOs: 0, activeDeliveryCount: 0, discrepancyCount: 0, partiallyReceivedCount: 0 });
-  const [v1Stats, setV1Stats] = useState({ openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0, outstandingPOCount: 0 });
+  const [stats, setStats] = useState(EMPTY_STATS);
+  const [workload, setWorkload] = useState(EMPTY_WORKLOAD);
   const [loading, setLoading] = useState(true);
   const [poVersion, setPoVersion] = useState(0);
   const [requestVersion, setRequestVersion] = useState(0);
 
+  // Same server call the PO screen renders its cards and tables from, so a
+  // warehouse card can never disagree with the rows beneath it.
+  const refreshWorkload = useCallback(async (params = {}) => {
+    try {
+      setWorkload({ ...EMPTY_WORKLOAD, ...(await getPOWorkloadServer(params)) });
+    } catch (e) {
+      console.error('Failed to load receiving workload', e);
+    }
+  }, []);
+
   const refreshStats = useCallback(async () => {
     try {
-      const [legacy, v1] = await Promise.all([getPOStats(), getV1WarehouseStatsServer()]);
-      setStats(legacy);
-      setV1Stats(v1);
+      setStats({ ...EMPTY_STATS, ...(await getPOStats()) });
+    } catch (e) {
+      console.error('Failed to load stats', e);
     }
-    catch (e) { console.error('Failed to load stats', e); }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => { await refreshStats(); if (!cancelled) setLoading(false); })();
+    (async () => {
+      await Promise.all([refreshStats(), refreshWorkload()]);
+      if (!cancelled) setLoading(false);
+    })();
     return () => { cancelled = true; };
-  }, [refreshStats]);
+  }, [refreshStats, refreshWorkload]);
 
   const updatePO = useCallback(async (poNumber, data) => {
     await updatePOServer(poNumber, data);
     setPoVersion((v) => v + 1);
-    await refreshStats();
-  }, [refreshStats]);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+  }, [refreshStats, refreshWorkload]);
 
+  // Legacy single-shot receiving, retained for pre-procurement records only.
   const updatePOMonitoring = useCallback(async (poNumber, data) => {
     const result = await updatePOMonitoringServer(poNumber, data);
     setPoVersion((v) => v + 1);
-    await refreshStats();
+    await Promise.all([refreshStats(), refreshWorkload()]);
     return result;
-  }, [refreshStats]);
+  }, [refreshStats, refreshWorkload]);
 
+  // Material requests (including request-level follow-ups for a partially
+  // approved request). Procurement follow-up against a PO is NOT exposed here:
+  // the Admin performs a Follow-up Purchase on the same PO instead.
   const createRequest = useCallback(async (data) => {
     await createRequestServer(data);
     setRequestVersion((v) => v + 1);
   }, []);
 
-  const confirmReceiving = useCallback(async (input) => {
-    const delivery = await confirmReceivingServer(input);
+  // Receiving is the warehouse's only purchase-order action.
+  const recordReceiving = useCallback(async (input) => {
+    const result = await recordReceivingServer(input);
     setPoVersion((v) => v + 1);
-    await refreshStats();
-    return delivery;
-  }, [refreshStats]);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
 
-  // V1 follow-up data comes only from server-computed DeliveryItem balances.
-  const getPOFollowUpBalance = useCallback(async (poNumber) => getPOFollowUpBalanceServer(poNumber), []);
-  const getWarehouseV1Partials = useCallback(async () => getWarehouseV1PartialsServer(), []);
-  const getPOQuantityTracker = useCallback(async (poNumber) => getPOQuantityTrackerServer(poNumber), []);
+  const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
 
   return <WarehouseDataContext.Provider value={{
-    stats, v1Stats, loading, poVersion, requestVersion,
+    stats, workload, loading, poVersion, requestVersion,
     completedCount: stats.completedPOs,
-    // Unified V1 definitions — all cards derive from Delivery/DeliveryItem
-    // aggregates via getV1WarehouseStats, never from legacy poType counts.
-    // Partially Received folds in every PO with a real quantity gap
-    // (requestOutstanding > 0), including approval shortfalls with no
-    // partial-status delivery.
-    openDeliveryCount: v1Stats.openDeliveryCount || 0,
-    discrepancyCount: v1Stats.discrepancyDeliveryCount || 0,
-    partiallyReceivedCount: v1Stats.outstandingPOCount || 0,
-    refreshStats, updatePO, updatePOMonitoring, createRequest, confirmReceiving,
-    getPOFollowUpBalance, getWarehouseV1Partials, getPOQuantityTracker,
+    // Parent-PO counts, from the same canonical quantity chain as the tables.
+    receivingDueCount: workload.receivingDuePOs ?? 0,
+    inProgressCount: workload.inProgressCount ?? 0,
+    completedWorkloadCount: workload.completedCount ?? 0,
+    refreshStats, refreshWorkload, updatePO, updatePOMonitoring, createRequest, recordReceiving, getPOTracker,
   }}>{children}</WarehouseDataContext.Provider>;
 }
 

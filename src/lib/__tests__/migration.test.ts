@@ -42,10 +42,17 @@ describe('legacy backfill mapping', () => {
 })
 
 describe('V1 workflow ownership guard', () => {
-  it('flags V1 procurement states', () => {
+  it('flags the canonical procurement lifecycle states', () => {
     expect(isV1WorkflowPO(legacyPO({ status: 'awaiting_purchase' }))).toBe(true)
-    expect(isV1WorkflowPO(legacyPO({ status: 'purchase_confirmed' }))).toBe(true)
-    expect(isV1WorkflowPO(legacyPO({ status: 'ready_for_delivery' }))).toBe(true)
+    expect(isV1WorkflowPO(legacyPO({ status: 'in_progress' }))).toBe(true)
+    expect(isV1WorkflowPO(legacyPO({ status: 'completed' }))).toBe(true)
+  })
+
+  it('no longer owns the retired delivery gates', () => {
+    // These are remapped to in_progress by the migration and are read-only
+    // compatibility values; the guard must not key off them any more.
+    expect(isV1WorkflowPO(legacyPO({ status: 'purchase_confirmed' }))).toBe(false)
+    expect(isV1WorkflowPO(legacyPO({ status: 'ready_for_delivery' }))).toBe(false)
   })
 
   it('flags confirmed purchases and existing deliveries', () => {
@@ -55,10 +62,15 @@ describe('V1 workflow ownership guard', () => {
     expect(isV1WorkflowPO({ ...legacyPO(), _count: { deliveries: 1 } })).toBe(true)
   })
 
-  it('leaves untouched and completed legacy POs outside the guard', () => {
+  it('leaves an untouched legacy PO outside the guard', () => {
     expect(isV1WorkflowPO(legacyPO())).toBe(false)
-    expect(isV1WorkflowPO(legacyPO({ status: 'completed', statusLabel: 'Completed' }))).toBe(false)
     expect(isV1WorkflowPO(null)).toBe(false)
+  })
+
+  it('owns a completed PO so the legacy path cannot rewrite it', () => {
+    // A completed PO is terminal for the procurement workflow; the deprecated
+    // single-shot receiving path must refuse it.
+    expect(isV1WorkflowPO(legacyPO({ status: 'completed', statusLabel: 'Completed' }))).toBe(true)
   })
 })
 

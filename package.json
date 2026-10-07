@@ -21,7 +21,11 @@
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "db:seed": "node prisma/seed.mjs"
+    "db:seed": "node prisma/seed.mjs",
+    "test:e2e:live": "CARDS_E2E_LIVE=1 vitest run --config vitest.live.config.ts",
+    "db:inspect": "node scripts/inspect-db.mjs",
+    "db:backup": "node scripts/backup-before-migration.mjs",
+    "db:cleanup-orphans": "node scripts/cleanup-e2e-orphans.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.9.1",

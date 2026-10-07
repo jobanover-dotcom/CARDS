@@ -13,8 +13,16 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    // Mirrors the tsconfig "@/paths" map for the specifiers this repo actually
+    // uses. Previously only "@" -> "./src" was mapped, which silently broke
+    // both `vi.mock('@/lib/prisma')` (resolved to a non-existent path) and
+    // any test that reached a server action importing '@/src/lib/...'.
+    alias: [
+      { find: /^@\/src\/(.*)$/, replacement: path.resolve(__dirname, './src/$1') },
+      { find: /^@\/lib\/(.*)$/, replacement: path.resolve(__dirname, './lib/$1') },
+      { find: /^@\/actions\/(.*)$/, replacement: path.resolve(__dirname, './actions/$1') },
+      { find: /^@\/app\/(.*)$/, replacement: path.resolve(__dirname, './app/$1') },
+      { find: /^@\/(.*)$/, replacement: path.resolve(__dirname, './src/$1') },
+    ],
   },
 })

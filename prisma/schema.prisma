@@ -58,6 +58,10 @@ model PurchaseOrder {
   profile Profile? @relation(fields: [profileId], references: [id])
   items PurchaseOrderItem[]
   monitoringItems PurchaseOrderMonitoringItem[]
+  // The supplier's signed delivery receipt: the evidence for how many units
+  // were actually purchased against this PO. Optional — receiving never requires
+  // one — but several may exist, one per receiving event.
+  receipts PurchaseOrderReceipt[]
   // Historical shipment records. The active workflow no longer creates
   // these — supplier delivery is external to CARDS. Read-only archive.
   deliveries Delivery[]
@@ -99,6 +103,25 @@ model PurchaseOrderItem {
   createdAt DateTime @default(now())
   monitoringItems PurchaseOrderMonitoringItem[]
   deliveryItems DeliveryItem[]
+  @@index([poNumber])
+}
+
+// The physical delivery receipt the supplier handed over, uploaded by the
+// warehouse while recording receiving. It is the documentary evidence that a
+// purchase was really made; the quantity chain remains the source of truth for
+// what CARDS believes arrived, and this only evidences it.
+//
+// Deliberately its own model rather than another DeliveryReceipt row: the
+// Delivery tables belong to a retired supplier-delivery workflow that the current
+// process never writes, so a PO receipt has nothing to hang off there.
+model PurchaseOrderReceipt {
+  id String @id @default(uuid())
+  poNumber String
+  po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
+  /// Object path inside the `delivery-receipts` Storage bucket, namespaced by PO.
+  storagePath String
+  uploadedBy String?
+  uploadedAt DateTime @default(now())
   @@index([poNumber])
 }
 

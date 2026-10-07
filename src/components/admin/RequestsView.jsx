@@ -5,14 +5,40 @@ import SearchInput from '../ui/SearchInput';
 import StatusBadge from '../ui/StatusBadge';
 import EmptyState from '../ui/EmptyState';
 import RequestDetailsModal from './RequestDetailsModal';
-import PageSkeleton from '../ui/PageSkeleton';
+import TableSkeleton from '../ui/TableSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
+import {
+  actionDestructive,
+  actionPrimary,
+  actionSecondary,
+  stripeAt,
+  tableEl,
+  tableScroller,
+  tableShell,
+  tdEl,
+  tdPrimary,
+  tdStrong,
+  thEl,
+  thNumEl,
+  theadEl,
+  trEl,
+  trHover,
+} from '../ui/tableTheme';
 import { useAdminData } from '../../context/AdminDataContext';
+import { useAuth } from '../../context/AuthContext';
 import { getRequests } from '../../../actions/requests';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
+const COLUMNS = ['R date', 'MRS #', 'Items', 'Qty', 'Approved by', 'Requisitioner', 'Approved / Balance', 'Status', 'Action'];
+const COL_SPAN = COLUMNS.length;
+
 function RequestsView() {
-  const { requestCounts, requestVersion } = useAdminData();
+  const { requestCounts, requestVersion, deleteRequest } = useAdminData();
+  const { user } = useAuth();
+  // This component is shared by /admin and /purchaser, and the dashboard layout
+  // checks only that someone is logged in, so this hides the control rather than
+  // protecting it. The real boundary is the role check inside the server action.
+  const isSuperadmin = user?.role === 'Superadmin';
   const [requestsSearchInput, setRequestsSearchInput] = useState('');
   const [requestsSearchQuery, setRequestsSearchQuery] = useState('');
   const [selectedRequestStatus, setSelectedRequestStatus] = useState('total');
@@ -20,6 +46,8 @@ function RequestsView() {
   const [showRequestDetailsModal, setShowRequestDetailsModal] = useState(false);
   const [showRemarksModal, setShowRemarksModal] = useState(false);
   const [remarksToDisplay, setRemarksToDisplay] = useState('');
+  const [deletingReqNumber, setDeletingReqNumber] = useState(null);
+  const [deleteError, setDeleteError] = useState('');
   const totalRequestsCount = requestCounts.total;
 
   useEffect(() => {
@@ -45,13 +73,40 @@ function RequestsView() {
     setShowRequestDetailsModal(true);
   };
 
-  if (initialLoading) {
-    return (
-      <div className="bg-white rounded-lg p-6">
-        <PageSkeleton />
-      </div>
+  // What a row can be opened for. This mirrors the existing permissions exactly:
+  // a pending request can be reviewed (approve / decline / raise a PO) and a
+  // rejected one can show the remarks it was turned down with. An already
+  // approved request has nothing to do here, so it gets no button rather than one
+  // that opens a dead end.
+  // Deletion is available on every status, including approved ones: an approved
+  // request that was never turned into a PO is a legitimate thing for a
+  // superadmin to clear. The server refuses when purchase orders still depend on
+  // the request, and that message is surfaced rather than swallowed.
+  const handleDeleteRequest = async (req) => {
+    if (deletingReqNumber) return;
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently delete request ${req.mrsNo} (${req.reqNumber}) and its ${req.items?.length ?? 0} item line(s)? This action cannot be undone.`,
     );
-  }
+    if (!confirmed) return;
+
+    setDeletingReqNumber(req.reqNumber);
+    setDeleteError('');
+    try {
+      await deleteRequest(req.reqNumber);
+    } catch (e) {
+      setDeleteError(e?.message || 'Failed to delete request');
+    } finally {
+      setDeletingReqNumber(null);
+    }
+  };
+
+  const rowAction = (req) => {
+    if (req.status === 'Rejected') return { label: 'Remarks', run: handleViewRejectedRemarks, className: actionSecondary };
+    if (req.status === 'Pending') return { label: 'Review', run: handleOpenRequestDetails, className: actionPrimary };
+    return null;
+  };
+
+  const filtering = Boolean(requestsSearchQuery || selectedRequestStatus !== 'total');
 
   return (
     <div className="bg-white rounded-lg p-6">
@@ -101,72 +156,111 @@ function RequestsView() {
           </p>
         </div>
         <SearchInput
-          placeholder="Search MRS #..."
+          placeholder="Search MRS #, request or item..."
           value={requestsSearchInput}
           onChange={(e) => setRequestsSearchInput(e.target.value)}
         />
-        <div className="mt-4 overflow-x-auto overflow-y-auto max-h-[500px] border border-[#e0e0e0] rounded-lg">
-          <table className="w-full min-w-[900px] border-collapse text-[13px]">
-            <thead>
-              <tr>
-                {['R date', 'MRS #', 'Items', 'Qty', 'Approved by', 'Requisitioner', 'Approved / Balance', 'Status'].map((h, i) => (
-                  <th key={i} className="bg-gradient-to-r from-[#fff8e1] to-[#ffe0b2] p-4 text-left font-bold text-[#f57f17] border-b-2 border-[#f57f17]/30 sticky top-0 z-10">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRequests.length > 0 ? (
-                <>
-                  {filteredRequests.map((req, index) => {
-                    const items = req.items || [];
-                    const totalQty = items.reduce((s, it) => s + it.qty, 0);
-                    const hasApprovals = items.some((it) => it.approvedQty != null);
-                    const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
-                    const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
-                    const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
-                    return (
-                      <tr key={index}
-                        className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${
-                          req.status === 'Approved' ? 'bg-[#e8f5e9]' : req.status === 'Partially Approved' ? 'bg-[#fff8e1]' : req.status === 'Pending' ? 'bg-[#fff9e6]' : 'bg-[#ffebee]'
-                        } hover:bg-[#f0f8fc]/50`}
-                        onClick={() => {
-                          if (req.status === 'Rejected') handleViewRejectedRemarks(req);
-                          else if (req.status === 'Pending') handleOpenRequestDetails(req);
-                        }}>
-                        <td className="p-4 text-[#333] font-medium">{req.date}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.mrsNo}</td>
-                        <td className="p-4 text-[#333] font-medium">
-                          {itemSummary}
-                          {req.followUpOfReqNumber && (
-                            <span className="ml-2 px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#5e35b1] text-[10px] font-bold align-middle" title={`Follow-up of request ${req.followUpOfReqNumber}`}>
-                              Follow-up (Req)
-                            </span>
-                          )}
-                          {req.followUpOfPoNumber && (
-                            <span className="ml-2 px-2 py-0.5 rounded-full bg-[#fef5f5] text-[#c62828] text-[10px] font-bold align-middle border border-[#ffcdd2]" title={`Follow-up of PO ${req.followUpOfPoNumber} (short delivery)`}>
-                              Follow-up (PO)
-                            </span>
-                          )}
-                        </td>
-                        <td className="p-4 text-[#333] font-medium">{totalQty}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.requestedBy}</td>
-                        <td className="p-4 text-[#333] font-medium">{req.requisitioner}</td>
-                        <td className={`p-4 font-medium whitespace-nowrap ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
-                          {totalApproved == null ? '—' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
-                        </td>
-                        <td className="p-4"><StatusBadge status={req.status} /></td>
-                      </tr>
-                    );
-                  })}
-                  <TableScrollSentinel colSpan={8} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
-                </>
-              ) : (
-                <EmptyState colSpan={8} message="No requests found" />
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p className="mt-2 text-right text-xs text-[#999]">Loaded {filteredRequests.length} of {total} requests</p>
+        {initialLoading ? (
+          <TableSkeleton columns={COLUMNS} />
+        ) : (
+          <div className={`mt-4 ${tableShell}`}>
+            <div className={tableScroller}>
+              <table className={`${tableEl} min-w-[1000px]`}>
+                <thead className={theadEl}>
+                  <tr>
+                    {COLUMNS.map((h) => (
+                      <th key={h} className={['Qty', 'Approved / Balance'].includes(h) ? thNumEl : thEl}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRequests.length > 0 ? (
+                    <>
+                      {filteredRequests.map((req, index) => {
+                        const items = req.items || [];
+                        const totalQty = items.reduce((s, it) => s + it.qty, 0);
+                        const hasApprovals = items.some((it) => it.approvedQty != null);
+                        const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
+                        const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+                        const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '\u2014';
+                        const action = rowAction(req);
+                        return (
+                          <tr
+                            key={req.reqNumber ?? index}
+                            className={`${trEl} ${trHover} ${stripeAt(index)} ${action ? 'cursor-pointer' : ''}`}
+                            onClick={() => action?.run(req)}
+                          >
+                            <td className={`${tdEl} whitespace-nowrap`}>{req.date}</td>
+                            <td className={`${tdPrimary} whitespace-nowrap`}>{req.mrsNo}</td>
+                            <td className={tdEl}>
+                              {itemSummary}
+                              {req.followUpOfReqNumber && (
+                                <span className="ml-2 px-2 py-0.5 rounded-full bg-[#ede7f6] text-[#5e35b1] text-[10px] font-bold align-middle" title={`Follow-up of request ${req.followUpOfReqNumber}`}>
+                                  Follow-up (Req)
+                                </span>
+                              )}
+                              {req.followUpOfPoNumber && (
+                                <span className="ml-2 px-2 py-0.5 rounded-full bg-[#fef5f5] text-[#c62828] text-[10px] font-bold align-middle border border-[#ffcdd2]" title={`Follow-up of PO ${req.followUpOfPoNumber} (short delivery)`}>
+                                  Follow-up (PO)
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-4 text-[#333] text-right tabular-nums">{totalQty}</td>
+                            <td className={tdStrong}>{req.requestedBy}</td>
+                            <td className={tdEl}>{req.requisitioner}</td>
+                            <td className={`p-4 font-medium whitespace-nowrap text-right tabular-nums ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
+                              {totalApproved == null ? '\u2014' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                            </td>
+                            <td className="p-4 whitespace-nowrap"><StatusBadge status={req.status} /></td>
+                            <td className="p-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center gap-2">
+                                {action && (
+                                  <button onClick={() => action.run(req)} className={action.className}>
+                                    {action.label}
+                                  </button>
+                                )}
+                                {isSuperadmin && (
+                                  <button
+                                    onClick={() => handleDeleteRequest(req)}
+                                    disabled={deletingReqNumber === req.reqNumber}
+                                    className={actionDestructive}
+                                  >
+                                    {deletingReqNumber === req.reqNumber ? 'Deleting…' : 'Delete'}
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      <TableScrollSentinel colSpan={COL_SPAN} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
+                    </>
+                  ) : (
+                    <EmptyState
+                      colSpan={COL_SPAN}
+                      message="No requests found"
+                      hint={
+                        requestsSearchQuery
+                          ? `Nothing matches "${requestsSearchQuery}". Clear the search to see every request.`
+                          : filtering
+                            ? 'Choose "Total Requests" above to see every status.'
+                            : 'Requests raised by a warehouse will appear here.'
+                      }
+                    />
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {deleteError && (
+          <div className="mt-3 rounded-lg border border-[#ffcdd2] bg-[#fef5f5] px-4 py-3 text-[13px] text-[#c62828]">
+            {deleteError}
+          </div>
+        )}
+        <p className="mt-2 text-right text-xs text-[#999]">
+          {initialLoading ? 'Loading requests\u2026' : `Loaded ${filteredRequests.length} of ${total} requests`}
+        </p>
       </div>
 
       {showRequestDetailsModal && selectedRequest && (

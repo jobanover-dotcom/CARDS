@@ -1,32 +1,44 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
-import { confirmPurchase as confirmPurchaseServer, markReadyForDelivery as markReadyForDeliveryServer, proceedToDelivery as proceedToDeliveryServer, getPOQuantityTracker as getPOQuantityTrackerServer, getV1WarehouseStats as getV1WarehouseStatsServer } from '../../actions/deliveries';
-import { getRequestCounts, approveRequestPartial, declineRequest } from '../../actions/requests';
+import { savePurchase as savePurchaseServer, createFollowUpPO as createFollowUpPOServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer } from '../../actions/procurement';
+import { getRequestCounts, approveRequestPartial, declineRequest, deleteRequest as deleteRequestServer } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
 import { deleteWarehouseWithArchive } from '../../actions/archive';
 
 const AdminDataContext = createContext(null);
 
+// Lifecycle counts. Every number counts PARENT purchase orders.
+const EMPTY_STATS = { totalPOs: 0, completedPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, unifiedDiscrepancyCount: 0 };
+// Quantity-driven workload: what the Admin can still buy, and what the
+// warehouse can still receive. Derived from the same canonical server-side
+// quantity chain the tables render.
+const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0 };
+
 export function AdminDataProvider({ children }) {
   const [warehouses, setWarehouses] = useState([]);
-  const [stats, setStats] = useState({
-    totalPOs: 0, completedPOs: 0, incompletePOs: 0,
-    activeDeliveryCount: 0, discrepancyCount: 0,
-  });
+  const [stats, setStats] = useState(EMPTY_STATS);
+  const [workload, setWorkload] = useState(EMPTY_WORKLOAD);
   const [requestCounts, setRequestCounts] = useState({ total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0 });
-  const [v1Stats, setV1Stats] = useState({ openDeliveryCount: 0, discrepancyDeliveryCount: 0, partialPOCount: 0, readyPOCount: 0 });
   const [loading, setLoading] = useState(true);
   const [poVersion, setPoVersion] = useState(0);
   const [requestVersion, setRequestVersion] = useState(0);
   const [userVersion, setUserVersion] = useState(0);
 
+  // Dashboard cards and their tables are both fed from the same server call,
+  // so a card can never disagree with the list beside it.
+  const refreshWorkload = useCallback(async (params = {}) => {
+    try {
+      setWorkload({ ...EMPTY_WORKLOAD, ...(await getPOWorkloadServer(params)) });
+    } catch (e) {
+      console.error('Failed to load procurement workload', e);
+    }
+  }, []);
+
   const refreshStats = useCallback(async () => {
     try {
-      const [legacy, v1] = await Promise.all([getPOStats(), getV1WarehouseStatsServer()]);
-      setStats(legacy);
-      setV1Stats(v1);
+      setStats({ ...EMPTY_STATS, ...(await getPOStats()) });
     } catch (e) {
       console.error('Failed to load PO stats', e);
     }
@@ -44,7 +56,7 @@ export function AdminDataProvider({ children }) {
     let cancelled = false;
     (async () => {
       try {
-        const [whs] = await Promise.all([getWarehouses(), refreshStats(), refreshRequestCounts()]);
+        const [whs] = await Promise.all([getWarehouses(), refreshStats(), refreshWorkload(), refreshRequestCounts()]);
         if (!cancelled) setWarehouses(whs.map(w => w.name));
       } catch (e) {
         console.error('Failed to load admin data', e);
@@ -53,7 +65,7 @@ export function AdminDataProvider({ children }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [refreshStats, refreshRequestCounts]);
+  }, [refreshStats, refreshWorkload, refreshRequestCounts]);
 
   const createPO = useCallback(async (data, source = null) => {
     if (source?.reqNumber) {
@@ -63,14 +75,14 @@ export function AdminDataProvider({ children }) {
     }
     setPoVersion(v => v + 1);
     setRequestVersion(v => v + 1);
-    await Promise.all([refreshStats(), refreshRequestCounts()]);
-  }, [refreshStats, refreshRequestCounts]);
+    await Promise.all([refreshStats(), refreshWorkload(), refreshRequestCounts()]);
+  }, [refreshStats, refreshWorkload, refreshRequestCounts]);
 
   const updatePO = useCallback(async (poNumber, data) => {
     await updatePOServer(poNumber, data);
     setPoVersion(v => v + 1);
-    await refreshStats();
-  }, [refreshStats]);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+  }, [refreshStats, refreshWorkload]);
 
   const addUser = useCallback(async (data) => {
     const user = await addUserServer(data);
@@ -95,6 +107,15 @@ export function AdminDataProvider({ children }) {
     await refreshRequestCounts();
   }, [refreshRequestCounts]);
 
+  // A removed request changes both the table and the stat cards, so the version
+  // bump refetches the rows while the explicit count refresh keeps the totals in
+  // step. Without the latter the cards would still count the deleted request.
+  const handleDeleteRequest = useCallback(async (reqNumber) => {
+    await deleteRequestServer(reqNumber);
+    setRequestVersion(v => v + 1);
+    await refreshRequestCounts();
+  }, [refreshRequestCounts]);
+
   const handleAddWarehouse = useCallback(async (name) => {
     const wh = await addWarehouseServer(name);
     setWarehouses(prev => [...prev, wh.name]);
@@ -114,46 +135,49 @@ export function AdminDataProvider({ children }) {
   const deletePO = useCallback(async (poNumber) => {
     await deletePOServer(poNumber);
     setPoVersion(v => v + 1);
-  }, []);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+  }, [refreshStats, refreshWorkload]);
 
-  const confirmPurchase = useCallback(async (input) => {
-    const po = await confirmPurchaseServer(input);
+  // Save Purchase records the FIRST purchase against a fresh PO: the supplier and
+  // the purchased quantities belong to that PO, and it holds exactly one
+  // purchasing transaction. Any further buying is a Follow-up Purchase below,
+  // which raises a NEW PO on the same material request.
+  const savePurchase = useCallback(async (input) => {
+    const result = await savePurchaseServer(input);
     setPoVersion(v => v + 1);
-    await refreshStats();
-    return po;
-  }, [refreshStats]);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
 
-  const markReadyForDelivery = useCallback(async (poNumber) => {
-    const po = await markReadyForDeliveryServer({ poNumber });
+  // Follow-up Purchase never amends the PO it follows. It creates another PO on
+  // the same MRS — same or different supplier — and leaves the original PO's
+  // supplier, quantities and history untouched.
+  const createFollowUpPO = useCallback(async (input) => {
+    const result = await createFollowUpPOServer(input);
     setPoVersion(v => v + 1);
-    await refreshStats();
-    return po;
-  }, [refreshStats]);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
 
-  const proceedToDelivery = useCallback(async (input) => {
-    const delivery = await proceedToDeliveryServer(input);
-    setPoVersion(v => v + 1);
-    await refreshStats();
-    return delivery;
-  }, [refreshStats]);
-
-  const getPOQuantityTracker = useCallback(async (poNumber) => getPOQuantityTrackerServer(poNumber), []);
+  const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
 
   return (
     <AdminDataContext.Provider value={{
       warehouses,
       stats,
-      v1Stats,
+      workload,
       requestCounts,
       loading,
       poVersion,
       requestVersion,
       userVersion,
       refreshStats,
+      refreshWorkload,
       createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
-      confirmPurchase, markReadyForDelivery, proceedToDelivery, getPOQuantityTracker,
+      savePurchase, createFollowUpPO, getPOTracker,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
+      deleteRequest: handleDeleteRequest,
       addWarehouse: handleAddWarehouse,
       deleteWarehouse: handleDeleteWarehouse,
     }}>

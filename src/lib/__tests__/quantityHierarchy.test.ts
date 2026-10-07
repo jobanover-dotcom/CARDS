@@ -1,147 +1,128 @@
 import { describe, it, expect } from 'vitest'
 import {
   assertValidPurchasedQty,
+  assertValidReceivedQty,
   buildItemChain,
-  deriveChainStatus,
+  buildPOItemChain,
   evaluatePOCompletion,
 } from '../deliveryQuantities'
 
-// The full hierarchy: Requested → Approved → Purchased → Delivered →
-// Received → Outstanding. Each balance answers exactly one workflow question
-// and no stage ever overwrites another.
+// The canonical chain: APPROVED → PURCHASED → RECEIVED.
+//
+// Two balances answer two different workflow questions and are never mixed:
+//
+//   procurementOutstanding = max(0, approved - purchased)  → Admin follow-up
+//   receivingOutstanding   = max(0, purchased - received)  → Warehouse receiving
+//
+// The "Delivered" layer belonged to the retired system-controlled delivery
+// workflow. buildItemChain below is kept only to pin the legacy archive
+// helpers that still read historical DEL-* rows.
 
-function chain(requestedQty: number, approvedQty: number, purchasedQty: number | null, deliveries: { deliveredQty: number; receivedQty: number }[]) {
-  return buildItemChain({ requestedQty, approvedQty, purchasedQty, deliveries })
+function line(approvedQty: number, purchasedQty: number, receivedQty: number) {
+  return buildPOItemChain({ requestedQty: approvedQty, approvedQty, purchasedQty, receivedQty })
 }
 
-describe('item chain balances', () => {
-  it('CASE A: 10/10/10 delivered 10 received 9 → outstanding 1', () => {
-    const c = chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 9 }])
-    expect(c.deliveredQty).toBe(10)
-    expect(c.receivedQty).toBe(9)
-    expect(c.deliveryRemaining).toBe(0)
-    expect(c.receivingRemaining).toBe(1)
-    expect(c.requestOutstanding).toBe(1)
-    expect(c.approvalShortfall).toBe(0)
-    expect(c.procurementShortfall).toBe(0)
-    expect(c.receivingShortfall).toBe(1)
+describe('canonical item chain balances', () => {
+  it('CASE A: 10/10/0 → nothing to purchase, 10 to receive', () => {
+    const c = line(10, 10, 0)
+    expect(c.approvedQty).toBe(10)
+    expect(c.purchasedQty).toBe(10)
+    expect(c.receivedQty).toBe(0)
+    expect(c.procurementOutstanding).toBe(0)
+    expect(c.receivingOutstanding).toBe(10)
+    expect(c.followUpRequired).toBe(false)
   })
 
-  it('CASE B: 10/10/10 delivered 10 received 10 → outstanding 0', () => {
-    const c = chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 10 }])
-    expect(c.requestOutstanding).toBe(0)
-    expect(c.receivingRemaining).toBe(0)
+  it('CASE B: 10/8/0 → 2 to purchase, 8 already purchased and awaiting delivery', () => {
+    const c = line(10, 8, 0)
+    expect(c.procurementOutstanding).toBe(2)
+    // The 8 purchased units are genuinely still to be received, so the PO has
+    // BOTH balances at once. This is exactly the distinction that keeps a
+    // warehouse receiving task separate from a purchaser follow-up task.
+    expect(c.receivingOutstanding).toBe(8)
+    expect(c.followUpRequired).toBe(true)
   })
 
-  it('CASE C: 10/9/9 delivered 9 received 9 → outstanding 1 born at approval', () => {
-    const c = chain(10, 9, 9, [{ deliveredQty: 9, receivedQty: 9 }])
-    expect(c.requestOutstanding).toBe(1)
-    expect(c.approvalShortfall).toBe(1)
-    expect(c.procurementShortfall).toBe(0)
-    expect(c.receivingShortfall).toBe(0)
+  it('CASE C: 10/9/9 → the shortfall was born at approval, not procurement', () => {
+    const c = line(9, 9, 9)
+    expect(c.procurementOutstanding).toBe(0)
+    expect(c.receivingOutstanding).toBe(0)
   })
 
-  it('CASE D1: 10/10/10 delivered 6 received 6 → remaining deliverable 4', () => {
-    const c = chain(10, 10, 10, [{ deliveredQty: 6, receivedQty: 6 }])
-    expect(c.deliveryRemaining).toBe(4)
-    expect(c.requestOutstanding).toBe(4)
+  it('CASE D: partial receiving leaves a receiving balance, never a procurement one', () => {
+    const c = line(10, 10, 6)
+    expect(c.procurementOutstanding).toBe(0)
+    expect(c.receivingOutstanding).toBe(4)
   })
 
-  it('CASE D2: second delivery 4/4 → everything zero, chain intact', () => {
-    const c = chain(10, 10, 10, [
-      { deliveredQty: 6, receivedQty: 6 },
-      { deliveredQty: 4, receivedQty: 4 },
-    ])
-    expect(c.deliveredQty).toBe(10)
-    expect(c.receivedQty).toBe(10)
-    expect(c.requestOutstanding).toBe(0)
-    expect(c.deliveryRemaining).toBe(0)
-  })
-
-  it('CASE E: 10/10/10 delivered 10 received 8 → outstanding 2', () => {
-    const c = chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 8 }])
-    expect(c.requestOutstanding).toBe(2)
-    expect(c.receivingRemaining).toBe(2)
+  it('CASE E: 10/10/8 → 2 to receive', () => {
+    const c = line(10, 10, 8)
+    expect(c.receivingOutstanding).toBe(2)
+    expect(c.procurementOutstanding).toBe(0)
   })
 
   it('defaults missing stages to zero without fabricating quantities', () => {
-    const c = buildItemChain({ requestedQty: null, approvedQty: undefined, purchasedQty: null, deliveries: [] })
-    expect(c.requestedQty).toBe(0)
-    expect(c.requestOutstanding).toBe(0)
+    const c = buildPOItemChain({ requestedQty: null, approvedQty: undefined, purchasedQty: null, receivedQty: null })
+    expect(c.approvedQty).toBe(0)
+    expect(c.purchasedQty).toBe(0)
+    expect(c.receivedQty).toBe(0)
+    expect(c.procurementOutstanding).toBe(0)
+    expect(c.receivingOutstanding).toBe(0)
   })
 })
 
 describe('PO completion (server-side rule)', () => {
-  it('CASE A NEVER completes: received 9 of purchased 10', () => {
-    const r = evaluatePOCompletion({ chains: [chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 9 }])], hasOpenDiscrepancy: false })
-    expect(r.procurementComplete).toBe(false)
-    expect(r.requestOutstanding).toBe(1)
-    expect(r.canComplete).toBe(false)
-  })
-
-  it('CASE A with discrepancy flag also never completes', () => {
-    const r = evaluatePOCompletion({ chains: [chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 9 }])], hasOpenDiscrepancy: true })
-    expect(r.canComplete).toBe(false)
-  })
-
-  it('CASE B completes: received 10, outstanding 0, no discrepancy', () => {
-    const r = evaluatePOCompletion({ chains: [chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 10 }])], hasOpenDiscrepancy: false })
+  it('CASE A NEVER completes: received 8 of purchased 10', () => {
+    const r = evaluatePOCompletion({ chains: [line(10, 10, 8)] })
     expect(r.procurementComplete).toBe(true)
-    expect(r.requestOutstanding).toBe(0)
+    expect(r.receivingComplete).toBe(false)
+    expect(r.receivingOutstanding).toBe(2)
+    expect(r.canComplete).toBe(false)
+  })
+
+  it('CASE B completes: purchased 10, received 10', () => {
+    const r = evaluatePOCompletion({ chains: [line(10, 10, 10)] })
+    expect(r.procurementComplete).toBe(true)
+    expect(r.receivingComplete).toBe(true)
     expect(r.canComplete).toBe(true)
   })
 
-  it('CASE C does not complete: procurement done but request outstanding 1', () => {
-    const r = evaluatePOCompletion({ chains: [chain(10, 9, 9, [{ deliveredQty: 9, receivedQty: 9 }])], hasOpenDiscrepancy: false })
+  it('CASE C does not complete: procurement done but receiving outstanding', () => {
+    const r = evaluatePOCompletion({ chains: [line(10, 10, 0)] })
     expect(r.procurementComplete).toBe(true)
-    expect(r.requestOutstanding).toBe(1)
+    expect(r.receivingOutstanding).toBe(10)
     expect(r.canComplete).toBe(false)
   })
 
-  it('CASE D completes only after the second delivery', () => {
-    const first = evaluatePOCompletion({ chains: [chain(10, 10, 10, [{ deliveredQty: 6, receivedQty: 6 }])], hasOpenDiscrepancy: false })
-    expect(first.canComplete).toBe(false)
-    const second = evaluatePOCompletion({
-      chains: [chain(10, 10, 10, [{ deliveredQty: 6, receivedQty: 6 }, { deliveredQty: 4, receivedQty: 4 }])],
-      hasOpenDiscrepancy: false,
-    })
-    expect(second.canComplete).toBe(true)
+  it('CASE D completes only after the follow-up purchase AND the final receipt', () => {
+    const afterFirstDelivery = evaluatePOCompletion({ chains: [line(10, 10, 8)] })
+    expect(afterFirstDelivery.canComplete).toBe(false)
+    const afterSecondDelivery = evaluatePOCompletion({ chains: [line(10, 10, 10)] })
+    expect(afterSecondDelivery.canComplete).toBe(true)
   })
 
-  it('CASE E does not complete: outstanding 2', () => {
-    const r = evaluatePOCompletion({ chains: [chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 8 }])], hasOpenDiscrepancy: false })
-    expect(r.canComplete).toBe(false)
-    expect(r.requestOutstanding).toBe(2)
-  })
-
-  it('never completes from a single delivery aggregate alone', () => {
-    // Two lines: one fully received, one untouched. A per-delivery check
-    // would wrongly complete; the PO-level rule must not.
-    const r = evaluatePOCompletion({
-      chains: [
-        chain(5, 5, 5, [{ deliveredQty: 5, receivedQty: 5 }]),
-        chain(5, 5, 5, []),
-      ],
-      hasOpenDiscrepancy: false,
-    })
+  it('never completes from one line while another is untouched', () => {
+    // Two lines, one fully done and one never purchased. An aggregate check
+    // (10 received out of 20 approved) must not complete the PO.
+    const r = evaluatePOCompletion({ chains: [line(10, 10, 10), line(10, 0, 0)] })
     expect(r.procurementComplete).toBe(false)
+    expect(r.procurementOutstanding).toBe(10)
     expect(r.canComplete).toBe(false)
-    expect(r.requestOutstanding).toBe(5)
   })
 
   it('empty PO never completes', () => {
-    expect(evaluatePOCompletion({ chains: [], hasOpenDiscrepancy: false }).canComplete).toBe(false)
+    expect(evaluatePOCompletion({ chains: [] }).canComplete).toBe(false)
   })
 })
 
 describe('purchase validation', () => {
-  it('rejects zero purchased qty', () => {
-    expect(() => assertValidPurchasedQty(0, 10, 'Cement')).toThrow(/positive whole number/)
-  })
-
   it('rejects negative and decimal purchased qty', () => {
     expect(() => assertValidPurchasedQty(-1, 10, 'Cement')).toThrow()
     expect(() => assertValidPurchasedQty(2.5, 10, 'Cement')).toThrow()
+  })
+
+  it('allows 0 so a line can be deferred to a later follow-up', () => {
+    expect(() => assertValidPurchasedQty(0, 10, 'Cement')).not.toThrow()
   })
 
   it('rejects purchased above approved', () => {
@@ -150,58 +131,63 @@ describe('purchase validation', () => {
   })
 })
 
-describe('follow-up caps', () => {
-  it('CASE C follow-up is capped at exactly 1 — never 9 or 10', () => {
-    const c = chain(10, 9, 9, [{ deliveredQty: 9, receivedQty: 9 }])
-    expect(c.requestOutstanding).toBe(1)
-    expect(1).toBeLessThanOrEqual(c.requestOutstanding)
-    expect(9).toBeGreaterThan(c.requestOutstanding)
-    expect(10).toBeGreaterThan(c.requestOutstanding)
+describe('receiving validation', () => {
+  it('rejects received above purchased', () => {
+    expect(() => assertValidReceivedQty(11, 10, 'Cement')).toThrow(/cannot exceed the purchased/)
   })
-
-  it('CASE E follow-up is capped at exactly 2', () => {
-    expect(chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 8 }]).requestOutstanding).toBe(2)
+  it('rejects a negative receipt', () => {
+    expect(() => assertValidReceivedQty(-1, 10, 'Cement')).toThrow()
   })
-
-  it('CASE B allows no follow-up', () => {
-    expect(chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 10 }]).requestOutstanding).toBe(0)
+  it('allows receiving nothing (0)', () => {
+    expect(() => assertValidReceivedQty(0, 10, 'Cement')).not.toThrow()
   })
 })
 
-describe('locked tracker contract: outstanding is reporting-only', () => {
-  // Bakal: 20 requested / 20 approved / 19 purchased / 10 delivered /
-  // 10 received → outstanding 10 = 1 procurement + 9 awaiting delivery.
-  // Maximum procurement follow-up = 1. The 9 must never be re-procurable.
-  it('Bakal: procurement=1, delivery-remaining=9, receiving=0, outstanding=10', () => {
-    const c = chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])
-    expect(c.procurementShortfall).toBe(1)
-    expect(c.deliveryRemaining).toBe(9)
-    expect(c.remainingToDeliver).toBe(9)
-    expect(c.receivingRemaining).toBe(0)
-    expect(c.remainingToReceive).toBe(0)
-    expect(c.requestOutstanding).toBe(10)
-    expect(c.approvalShortfall).toBe(0)
+describe('follow-up caps', () => {
+  it('CASE B allows no follow-up when fully purchased', () => {
+    expect(line(10, 10, 0).procurementOutstanding).toBe(0)
   })
 
-  it('Bakal follow-up hard-block: 1 allowed, 2 and 10 rejected', () => {
-    const c = chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])
-    expect(1).toBeLessThanOrEqual(c.procurementShortfall)
-    expect(2).toBeGreaterThan(c.procurementShortfall)
-    expect(10).toBeGreaterThan(c.procurementShortfall)
+  it('CASE E follow-up is capped at exactly 2', () => {
+    expect(line(10, 10, 8).receivingOutstanding).toBe(2)
+  })
+})
+
+describe('locked contract: an unreceived purchase is never re-procurable', () => {
+  // 20 approved / 19 purchased / 10 received. Maximum procurement follow-up
+  // is exactly 1 — the 1 already-purchased-but-unreceived unit is a RECEIVING
+  // balance and must never become procurement follow-up work.
+  it('procurement=1 and receiving=1, never procurement=2', () => {
+    const c = line(20, 19, 10)
+    expect(c.procurementOutstanding).toBe(1)
+    expect(c.receivingOutstanding).toBe(9)
+    expect(2).toBeGreaterThan(c.procurementOutstanding)
+    expect(9).toBeGreaterThan(c.procurementOutstanding)
   })
 
-  it('partial approval never becomes procurement follow-up', () => {
-    // 20 requested / 18 approved / 18 purchased / 18 delivered / 18 received
-    const c = chain(20, 18, 18, [{ deliveredQty: 18, receivedQty: 18 }])
-    expect(c.approvalShortfall).toBe(2)
-    expect(c.procurementShortfall).toBe(0)
-    expect(c.deliveryRemaining).toBe(0)
+  it('a purchased-but-unreceived unit does not create procurement follow-up', () => {
+    const c = line(10, 10, 5)
+    expect(c.procurementOutstanding).toBe(0)
+    expect(c.receivingOutstanding).toBe(5)
+    expect(c.followUpRequired).toBe(false)
+  })
+})
+
+describe('legacy delivery-layer helpers (historical DEL-* reads only)', () => {
+  function chain(deliveries: { deliveredQty: number; receivedQty: number }[]) {
+    return buildItemChain({ requestedQty: null, approvedQty: null, purchasedQty: null, deliveries })
+  }
+
+  it('still derives delivered/received totals from archived delivery rows', () => {
+    const c = chain([{ deliveredQty: 60, receivedQty: 58 }])
+    expect(c.deliveredQty).toBe(60)
+    expect(c.receivedQty).toBe(58)
+    expect(c.requestOutstanding).toBe(0)
   })
 
-  it('deriveChainStatus never uses outstanding alone', () => {
-    expect(deriveChainStatus(chain(20, 20, 19, [{ deliveredQty: 10, receivedQty: 10 }])).status).toBe('awaiting-purchase')
-    expect(deriveChainStatus(chain(20, 18, 18, [{ deliveredQty: 18, receivedQty: 18 }])).status).toBe('approval-shortfall')
-    expect(deriveChainStatus(chain(10, 10, 10, [{ deliveredQty: 10, receivedQty: 9 }])).status).toBe('awaiting-receiving')
-    expect(deriveChainStatus(chain(20, 20, 20, [{ deliveredQty: 20, receivedQty: 20 }])).status).toBe('complete')
+  it('does not fabricate quantities from an empty archive', () => {
+    const c = chain([])
+    expect(c.deliveredQty).toBe(0)
+    expect(c.receivedQty).toBe(0)
   })
 })

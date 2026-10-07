@@ -1,9 +1,9 @@
 'use server';
 
-import { prisma } from '@/lib/prisma';
+import { prisma, runTx } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
-import { buildPOChains } from './deliveries';
+import { buildPOChains } from './procurement';
 import { isV1WorkflowPO } from '@/src/lib/poMigration';
 
 type Tx = Prisma.TransactionClient;
@@ -65,7 +65,7 @@ export async function createRequest(data: {
   // Follow-up validation and creation run inside one transaction with row
   // locks on the source, so two simultaneous submissions cannot both pass
   // the duplicate/outstanding checks and create duplicate follow-ups.
-  return prisma.$transaction(async (tx) => {
+  return runTx(async (tx) => {
     if (rest.followUpOfReqNumber) {
       await tx.$queryRaw`SELECT "reqNumber" FROM "WarehouseRequest" WHERE "reqNumber" = ${rest.followUpOfReqNumber} FOR UPDATE`;
       const source = await tx.warehouseRequest.findUnique({ where: { reqNumber: rest.followUpOfReqNumber }, include: { items: true } });
@@ -81,27 +81,34 @@ export async function createRequest(data: {
     }
 
     if (rest.followUpOfPoNumber) {
+      // AUTHORIZATION: chasing a procurement shortfall is a purchaser action.
+      // The Admin performs "Follow-up Purchase" against the SAME PO; Warehouse
+      // must not be able to use this path as a procurement follow-up
+      // mechanism. The branch itself is retained for historical compatibility
+      // with follow-up requests that already exist against a PO.
+      if (user.role !== 'Admin' && user.role !== 'Superadmin')
+        throw new Error(
+          'Unauthorized: a procurement follow-up against a purchase order is handled by the purchaser via Follow-up Purchase on the same PO',
+        );
       await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "poNumber" = ${rest.followUpOfPoNumber} FOR UPDATE`;
       const source = await tx.purchaseOrder.findUnique({ where: { poNumber: rest.followUpOfPoNumber }, include: { items: { include: { monitoringItems: true } } } });
       if (!source) throw new Error(`Source purchase order ${rest.followUpOfPoNumber} not found`);
-      if (user.role === 'Warehouse' && source.warehouse !== user.warehouse) throw new Error('Unauthorized');
       const requestedByDescription = new Map(items.map((i) => [i.itemDescription.trim().toLowerCase(), i.qty]));
       const isV1 = isV1WorkflowPO(source);
       if (isV1) {
-        // V1 POs — HARD-BLOCK: procurement follow-up is capped at
-        // procurementShortfall (approved - purchased) ONLY. requestOutstanding
-        // is reporting-only and must never authorize procurement. A purchased-
-        // but-undelivered unit belongs to the delivery workflow, not to a new
-        // procurement. No override: approved-qty changes need a separate
-        // approval/amendment workflow.
+        // HARD-BLOCK: a procurement follow-up request may claim at most the
+        // procurement outstanding balance (approved - purchased) per line. The
+        // reporting-only outstanding total must never authorize procurement,
+        // and a purchased-but-unreceived unit belongs to receiving, not to a
+        // new procurement.
         const { chains } = await buildPOChains(tx, rest.followUpOfPoNumber);
         const claimed = (desc: string) => requestedByDescription.get(desc.trim().toLowerCase()) ?? 0;
         for (const chain of chains) {
-          if (claimed(chain.itemDescription) > chain.procurementShortfall)
-            throw new Error(`Follow-up qty for "${chain.itemDescription}" cannot exceed the procurement shortfall of ${chain.procurementShortfall} ${chain.unit} (approved ${chain.approvedQty}, purchased ${chain.purchasedQty}). ${chain.deliveryRemaining} unit(s) are already purchased and awaiting delivery — track them through deliveries, not a new procurement.`);
+          if (claimed(chain.itemDescription) > chain.procurementOutstanding)
+            throw new Error(`Follow-up qty for "${chain.itemDescription}" cannot exceed the procurement outstanding balance of ${chain.procurementOutstanding} ${chain.unit} (approved ${chain.approvedQty}, purchased ${chain.purchasedQty}). ${chain.receivingOutstanding} unit(s) are already purchased and awaiting warehouse receiving — they must not be re-procured.`);
         }
-        if (!chains.some((c) => claimed(c.itemDescription) > 0 && claimed(c.itemDescription) <= c.procurementShortfall))
-          throw new Error('No requested item has a procurement shortfall available for follow-up');
+        if (!chains.some((c) => claimed(c.itemDescription) > 0 && claimed(c.itemDescription) <= c.procurementOutstanding))
+          throw new Error('No requested item has a procurement outstanding balance available for follow-up');
       } else {
         for (const sourceItem of source.items) {
           const received = sourceItem.monitoringItems[0]?.qtyReceived ?? 0;
@@ -136,7 +143,7 @@ export async function approveRequest(reqNumber: string) {
   await assertElevated();
   const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber }, include: { items: true } });
   if (!req) throw new Error('Request not found');
-  return prisma.$transaction(async (tx) => {
+  return runTx(async (tx) => {
     await Promise.all(req.items.map((it) => tx.warehouseRequestItem.update({ where: { id: it.id }, data: { approvedQty: it.qty } })));
     return tx.warehouseRequest.update({ where: { reqNumber }, data: { status: 'Approved' } });
   });
@@ -147,7 +154,7 @@ export async function approveRequestPartial(reqNumber: string, itemApprovals?: {
   const req = await prisma.warehouseRequest.findUnique({ where: { reqNumber }, include: { items: true } });
   if (!req) throw new Error('Request not found');
   const approvalMap = new Map((itemApprovals || []).map((a) => [a.id, a.approvedQty]));
-  return prisma.$transaction(async (tx) => {
+  return runTx(async (tx) => {
     let allFull = true;
     for (const item of req.items) {
       const raw = approvalMap.has(item.id) ? approvalMap.get(item.id)! : item.qty;
@@ -164,6 +171,36 @@ export async function declineRequest(reqNumber: string, remarks: string) {
   await assertElevated();
   if (!remarks?.trim()) throw new Error('Remarks are required when declining a request');
   return prisma.warehouseRequest.update({ where: { reqNumber }, data: { status: 'Rejected', remarks: remarks.trim() } });
+}
+
+// Deleting a request is a cleanup action, not a decision about one. Deciding
+// belongs to purchasers and superadmins alike (see assertElevated); erasing is
+// reserved for the superadmin, matching the other permanent deletes in the app.
+async function assertCanDeleteRequests() {
+  const user = await getCurrentUser();
+  if (!user || user.role !== 'Superadmin') throw new Error('Unauthorized: only superadmin can delete requests');
+}
+
+export async function deleteRequest(reqNumber: string) {
+  await assertCanDeleteRequests();
+  const request = await prisma.warehouseRequest.findUnique({ where: { reqNumber } });
+  if (!request) throw new Error('Request not found');
+
+  // PurchaseOrder.sourceReqNumber is a plain string with no foreign key, so the
+  // database will happily let a purchase order outlive the request it was raised
+  // against. That is not harmless: `loadSourceRequest` resolves a PO's approved
+  // quantity by reqNumber first and then falls back to the earliest request
+  // sharing the same mrsNo, so an orphaned link silently re-resolves against a
+  // different request's approvedQty and corrupts every outstanding balance for
+  // that MRS. Refuse, and name the POs so the superadmin knows what to remove.
+  const linkedPOs = await prisma.purchaseOrder.findMany({ where: { sourceReqNumber: reqNumber }, select: { poNumber: true } });
+  if (linkedPOs.length) {
+    throw new Error(`Cannot delete request ${request.mrsNo} (${reqNumber}): purchase order(s) ${linkedPOs.map((p) => p.poNumber).join(', ')} were raised against it. Delete those purchase orders first.`);
+  }
+
+  // Line items cascade at the database level — WarehouseRequestItem.request is
+  // onDelete: Cascade on reqNumber — so nothing is left orphaned here.
+  return prisma.warehouseRequest.delete({ where: { reqNumber } });
 }
 
 export interface FollowUpInfo { reqNumber: string; mrsNo: string; status: string; }

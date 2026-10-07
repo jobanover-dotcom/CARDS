@@ -1,216 +1,256 @@
 'use client';
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import StatCard from '../ui/StatCard';
-import StackedStatCard from '../ui/StackedStatCard';
-import SearchInput from '../ui/SearchInput';
-import EmptyState from '../ui/EmptyState';
-import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
-import GenerateReportButton from './GenerateReportButton';
+import StatusBadge from '../ui/StatusBadge';
+import DataTable from '../ui/DataTable';
+import TableSkeleton from '../ui/TableSkeleton';
+import Skeleton from '../ui/Skeleton';
+import { PurchaseOutstanding, ReceivingOutstanding } from '../ui/QuantityIndicator';
 import WarehouseFilter from './WarehouseFilter';
-import PageSkeleton from '../ui/PageSkeleton';
-import TableScrollSentinel from '../ui/TableScrollSentinel';
+import ReportCards from './ReportCards';
 import { useAdminData } from '../../context/AdminDataContext';
-import { getPOs, getPOStats, getReportData } from '../../../actions/pos';
-import { getDeliveryReportData } from '../../../actions/deliveries';
-import { useInfiniteRows } from '../../hooks/useInfiniteRows';
-import { IN_PROGRESS_STATUSES } from '../../lib/deliveryStatus';
+import { getDashboardOverview } from '../../../actions/procurement';
+
+// Dashboard = OVERVIEW AND REPORTING CENTRE, not a second Purchase Orders page.
+//
+// What changed and why:
+//
+//   * The old 13-column PO table is gone. It duplicated the Purchase Orders page
+//     and made the Dashboard a spreadsheet. Detailed PO management, expansion and
+//     workflow actions live on Purchase Orders; nothing here performs a
+//     purchase.
+//   * The cards are the quantity-driven sections used by Purchase Orders, read
+//     from the same server-side scan, so a card can never disagree with the PO
+//     page. There is no "Incomplete" label and no legacy status filtering.
+//   * The sections below are ITEM level, because "what needs attention" is a
+//     question about quantities, not about parent POs.
+//   * Reports export the complete filtered dataset; the in-page preview is
+//     capped and always says how many rows it is hiding.
+//
+// Supplier delivery is out of scope. Nothing here tracks, confirms or chases a
+// supplier shipment, and no column or control implies that CARDS does.
+
+const SECTIONS = [
+  { bucket: 'all', label: 'Total POs', color: 'slate', description: 'Every purchase order' },
+  { bucket: 'pending_purchase', label: 'Pending Purchase', color: 'blue', description: 'Nothing bought yet' },
+  { bucket: 'in_progress', label: 'In Progress', color: 'amber', description: 'Started, not finished' },
+  { bucket: 'discrepancy', label: 'Discrepancies', color: 'red', description: 'Receiving discrepancy flagged' },
+  { bucket: 'completed', label: 'Completed', color: 'green', description: 'All quantities received' },
+];
+
+// Workload sections. Each is an item-level answer to "what needs attention".
+const WORKLOAD = [
+  {
+    key: 'receivingAttention',
+    title: 'Receiving Attention',
+    accent: 'amber',
+    subtitle: 'Purchased units the warehouse still has to receive. Legitimate work, not a discrepancy.',
+  },
+  {
+    key: 'pendingPurchase',
+    title: 'Pending Purchase',
+    accent: 'blue',
+    subtitle: 'Approved units that still need to be bought.',
+  },
+  {
+    key: 'discrepancies',
+    title: 'Discrepancies',
+    accent: 'red',
+    subtitle: 'Items on a purchase order the existing receiving-discrepancy rule has flagged.',
+  },
+  {
+    key: 'completed',
+    title: 'Completed',
+    accent: 'green',
+    subtitle: 'Items fully purchased and fully received.',
+  },
+];
+
+const ACCENT_CHIP = {
+  amber: 'bg-[#fff8e1] text-[#f57f17] border-[#fdd835]',
+  blue: 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
+  red: 'bg-[#fef5f5] text-[#c62828] border-[#ef9a9a]',
+  green: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
+};
+
+// One definition per column, read by DataTable for BOTH the header and the
+// cells. Alignment therefore lives next to the content it aligns with instead
+// of being repeated in the <thead> and the <tbody>, where the two were free to
+// disagree.
+const ITEM_COLUMNS = [
+  {
+    key: 'poItem',
+    label: 'PO / Item',
+    cell: (r) => (
+      <>
+        <div className="font-semibold text-[#333] whitespace-nowrap">{r.poNumber}</div>
+        <div className="text-[11px] text-[#777]">
+          {r.itemDescription} <span className="text-[#999]">({r.unit})</span>
+        </div>
+      </>
+    ),
+  },
+  { key: 'approvedQty', label: 'Approved', align: 'right', cell: (r) => r.approvedQty },
+  { key: 'purchasedQty', label: 'Purchased', align: 'right', cell: (r) => r.purchasedQty },
+  { key: 'receivedQty', label: 'Received', align: 'right', cell: (r) => r.receivedQty },
+  {
+    key: 'procurementOutstanding',
+    label: 'To Purchase',
+    align: 'right',
+    cell: (r) => <PurchaseOutstanding value={r.procurementOutstanding} />,
+  },
+  {
+    key: 'receivingOutstanding',
+    label: 'To Receive',
+    align: 'right',
+    cell: (r) => <ReceivingOutstanding value={r.receivingOutstanding} />,
+  },
+  {
+    key: 'itemStatusLabel',
+    label: 'Status',
+    nowrap: true,
+    cell: (r) => <StatusBadge status={r.itemStatusLabel} />,
+  },
+];
+
+function CardGridSkeleton() {
+  return (
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] max-md:grid-cols-1 gap-4 mb-8">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} className="border-2 border-[#e0e0e0] rounded-xl p-8 bg-white">
+          <Skeleton className="h-4 w-24 mb-4" />
+          <Skeleton className="h-10 w-14" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SectionTable({ rows }) {
+  return (
+    <DataTable
+      variant="primary"
+      columns={ITEM_COLUMNS}
+      rows={rows}
+      rowKey={(r, i) => `${r.poNumber}-${r.poItemId}-${i}`}
+    />
+  );
+}
 
 function DashboardView() {
-  const { warehouses, poVersion, deletePO } = useAdminData();
-  const [selectedStat, setSelectedStat] = useState(null);
-  const [dashboardSearchInput, setDashboardSearchInput] = useState('');
-  const [dashboardSearchQuery, setDashboardSearchQuery] = useState('');
+  const { warehouses, poVersion } = useAdminData();
   const [selectedWarehouse, setSelectedWarehouse] = useState('');
-  const [selectedReceiptPo, setSelectedReceiptPo] = useState(null);
-  const [showReceiptModal, setShowReceiptModal] = useState(false);
-  const [scopedStats, setScopedStats] = useState(null);
+  const [overview, setOverview] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    const t = setTimeout(() => setDashboardSearchQuery(dashboardSearchInput), 300);
-    return () => clearTimeout(t);
-  }, [dashboardSearchInput]);
-
-  const queryParams = useMemo(() => ({
-    status: selectedStat === 'completed' ? 'completed' : undefined,
-    statusIn: selectedStat === 'in-progress' ? IN_PROGRESS_STATUSES : undefined,
-    hasReceivingDiscrepancy: selectedStat === 'discrepancy' ? true : undefined,
-    search: dashboardSearchQuery || undefined,
-    warehouse: selectedWarehouse || undefined,
-  }), [selectedStat, dashboardSearchQuery, selectedWarehouse]);
-
-  const { rows: purchaseOrders, total, initialLoading, loadingMore, hasMore, loadMore } =
-    useInfiniteRows(getPOs, queryParams, poVersion);
+  // One call feeds the cards and every workload section, so they are always
+  // describing the same rows. Re-runs on a warehouse change and whenever PO
+  // quantities change elsewhere in the app.
+  const load = useCallback(async () => {
+    try {
+      setOverview(await getDashboardOverview({ warehouse: selectedWarehouse || undefined, preview: 8 }));
+      setError(null);
+    } catch (e) {
+      setError(e?.message || 'Failed to load dashboard');
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedWarehouse]);
 
   useEffect(() => {
     let cancelled = false;
-    getPOStats(selectedWarehouse || undefined)
-      .then(s => { if (!cancelled) setScopedStats(s); })
-      .catch(e => console.error('Failed to load dashboard stats', e));
+    setLoading(true);
+    (async () => {
+      if (cancelled) return;
+      await load();
+    })();
     return () => { cancelled = true; };
-  }, [selectedWarehouse, poVersion]);
-
-  const stats = scopedStats;
-  const whTotalPOs = stats?.totalPOs ?? 0;
-  const whCompletedPOs = stats?.completedPOs ?? 0;
-  const whDiscrepancyPOs = stats?.unifiedDiscrepancyCount ?? 0;
-  const whInProgressPOs = stats?.inProgressCount ?? 0;
-  const whIncompletePOs = whTotalPOs - whCompletedPOs;
-
-  const handleOpenReceipt = (po) => {
-    setSelectedReceiptPo(po);
-    setShowReceiptModal(true);
-  };
-
-  const fetchReportData = () => getReportData(queryParams);
-  const fetchDeliveryReportData = () => getDeliveryReportData({ warehouse: selectedWarehouse || undefined });
-
-  if (initialLoading) {
-    return (
-      <div className="bg-white rounded-lg p-6">
-        <PageSkeleton />
-      </div>
-    );
-  }
+  }, [load, poVersion]);
 
   return (
     <div className="bg-white rounded-lg p-6">
       <div className="flex items-start justify-between mb-8 max-md:flex-col max-md:gap-4">
         <div>
           <h1 className="m-0 text-3xl max-md:text-2xl text-[#333] font-bold">Dashboard</h1>
-          <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">Overview of complete vs incomplete purchase order fulfillment</p>
+          <p className="mt-2 mx-0 mb-0 text-sm text-[#666]">
+            Procurement overview and reports &mdash; what is outstanding, what is flagged, and what can be exported
+          </p>
         </div>
         <WarehouseFilter warehouses={warehouses} selected={selectedWarehouse} onChange={setSelectedWarehouse} />
       </div>
 
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(250px,1fr))] max-md:grid-cols-1 gap-5 mb-8">
-        <StatCard
-          label="Total PO's"
-          count={whTotalPOs}
-          color="blue"
-          isActive={selectedStat === 'total'}
-          onClick={() => setSelectedStat(selectedStat === 'total' ? null : 'total')}
-        />
-        <StatCard
-          label="Completed"
-          count={whCompletedPOs}
-          color="green"
-          isActive={selectedStat === 'completed'}
-          onClick={() => setSelectedStat(selectedStat === 'completed' ? null : 'completed')}
-        />
-        <StackedStatCard
-          topLabel="Incomplete"
-          topCount={whDiscrepancyPOs}
-          topColor="red"
-          topIsActive={selectedStat === 'discrepancy'}
-          topOnClick={() => setSelectedStat(selectedStat === 'discrepancy' ? null : 'discrepancy')}
-          bottomLabel="In Progress"
-          bottomCount={whInProgressPOs}
-          bottomColor="yellow"
-          bottomIsActive={selectedStat === 'in-progress'}
-          bottomOnClick={() => setSelectedStat(selectedStat === 'in-progress' ? null : 'in-progress')}
-        />
-      </div>
+      {error && <p className="mb-4 text-[13px] text-[#c62828] font-semibold">{error}</p>}
 
-      <div className="mt-8">
-        <div className="mb-4">
-          <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedStat === 'completed' ? 'Completed Purchase Orders' : selectedStat === 'discrepancy' ? 'Incomplete Purchase Orders (Discrepancy)' : selectedStat === 'in-progress' ? 'In Progress Purchase Orders' : 'Total Purchase Orders'}
-          </h2>
-          <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedStat === 'completed' ? 'Successfully completed purchase orders' : selectedStat === 'discrepancy' ? 'Purchase orders with quantity discrepancies' : selectedStat === 'in-progress' ? 'Purchase orders still moving through procurement' : 'All made purchase orders'}
-          </p>
+      {loading ? (
+        <CardGridSkeleton />
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] max-md:grid-cols-1 gap-4 mb-8">
+          {SECTIONS.map((s) => (
+            <StatCard
+              key={s.bucket}
+              label={s.label}
+              count={overview?.counts?.[s.bucket] ?? 0}
+              description={s.description}
+              color={s.color}
+            />
+          ))}
         </div>
-        <div className="flex items-center justify-between gap-4 mb-4">
-          <SearchInput
-            placeholder="Search PO number..."
-            value={dashboardSearchInput}
-            onChange={(e) => setDashboardSearchInput(e.target.value)}
-          />
-          <GenerateReportButton fetchReportData={fetchReportData} showActiveDeliveryOption={selectedStat === null || selectedStat === 'total'} fetchDeliveryReportData={fetchDeliveryReportData} />
-        </div>
-        <div className="border border-[#e0e0e0] rounded-lg overflow-hidden">
-          <div className="overflow-x-auto max-h-[500px]">
-            <table className="w-full border-collapse text-[13px]">
-              <thead className="sticky top-0 z-10">
-                <tr>
-                  <th colSpan={10} className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-2 text-center font-bold text-[#1e3c72] text-xs border-b-2 border-[#1e3c72]/30">PURCHASE ORDER</th>
-                  <th colSpan={10} className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-2 text-center font-bold text-[#2e7d32] text-xs border-b-2 border-[#2e7d32]/30">WAREHOUSE MONITORING</th>
-                </tr>
-                <tr>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">PO date</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">PO number</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Item Description</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Qty</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Unit</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Supplier Name</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Requisitioner</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">MRS No.</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">PO red date</th>
-                  <th className="bg-gradient-to-r from-[#e3f2fd] to-[#bbdefb] p-4 text-left font-bold text-[#1e3c72] border-b-2 border-[#1e3c72]/30 whitespace-nowrap">Pick-up by</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">PO number</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Pick-up date</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Item Description</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Qty. rvd</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Unit</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Delivered By</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Date delivered</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Reference No.</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">DR date</th>
-                  <th className="bg-gradient-to-r from-[#e8f5e9] to-[#c8e6c9] p-4 text-left font-bold text-[#2e7d32] border-b-2 border-[#2e7d32]/30 whitespace-nowrap">Pick-up By</th>
-                </tr>
-              </thead>
-              <tbody>
-                {purchaseOrders.length > 0 ? (
-                  <>
-                    {purchaseOrders.map((order, index) => {
-                      const items = order.items || [];
-                      const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
-                      const totalQty = items.reduce((s, it) => s + it.qty, 0);
-                      const unitSummary = items.length === 1 ? items[0].unit : (items.length ? 'various' : '—');
-                      const isCompletedOrInProgress = order.status === 'completed' || IN_PROGRESS_STATUSES.includes(order.status);
-                      const hasMonitoring = order.monQtyRvd && order.monQtyRvd !== '';
-                      const isDiscrepancy = hasMonitoring && parseInt(order.monQtyRvd) !== totalQty;
-                      const rowBg = isDiscrepancy ? 'bg-[#fef5f5]' : isCompletedOrInProgress ? 'bg-[#e8f5e9]' : order.status === 'incomplete' ? 'bg-[#fef5f5]' : (index % 2 === 0 ? 'bg-white' : 'bg-gray-50/50');
-                      return (
-                        <tr key={index} onClick={() => handleOpenReceipt(order)} className={`border-b border-gray-200 transition-colors duration-150 cursor-pointer ${rowBg} hover:bg-[#f0f8fc]/50`}>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.date}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poNumber}</td>
-                          <td className="p-4 text-[#333] font-medium">{itemSummary}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{totalQty}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{unitSummary}</td>
-                          <td className="p-4 text-[#333] font-medium">{order.supplier}</td>
-                          <td className="p-4 text-[#333] font-medium">{order.requisitioner}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.mrsNo}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.poExpDate}</td>
-                          <td className="p-4 text-[#333] font-medium whitespace-nowrap">{order.pickupBy}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.poNumber}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.date}</td>
-                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{itemSummary}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold bg-red-50' : 'text-[#333]'}`}>{order.monQtyRvd || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{unitSummary}</td>
-                          <td className={`p-4 font-medium ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDeliveredBy || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDateDelivered || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monReferenceNo || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.monDrDate || '-'}</td>
-                          <td className={`p-4 font-medium whitespace-nowrap ${isDiscrepancy ? 'text-[#d32f2f] font-bold' : 'text-[#333]'}`}>{order.pickupBy}</td>
-                        </tr>
-                      );
-                    })}
-                    <TableScrollSentinel colSpan={20} onLoadMore={loadMore} isLoadingMore={loadingMore} disabled={!hasMore} />
-                  </>
-                ) : (
-                  <EmptyState colSpan={20} message="No purchase orders found" />
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <p className="mt-2 text-right text-xs text-[#999]">Loaded {purchaseOrders.length} of {total} purchase orders</p>
-      </div>
-
-      {showReceiptModal && selectedReceiptPo && (
-        <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
       )}
+
+      {overview?.truncated && (
+        <p className="mb-4 text-[12px] text-[#e65100] font-semibold">
+          The purchase-order scan limit was reached, so these counts may under-report. Exports are unaffected in
+          structure but cover the same scanned set.
+        </p>
+      )}
+
+      <div className="flex flex-col gap-4 mb-8">
+        {WORKLOAD.map((section) => {
+          const data = overview?.[section.key];
+          return (
+            <div key={section.key} className="border border-[#e0e0e0] rounded-xl overflow-hidden">
+              <div className="flex flex-wrap justify-between items-center gap-2 px-4 py-3 bg-gray-50/60 border-b border-[#eee]">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${ACCENT_CHIP[section.accent]}`}>
+                      {section.title}
+                    </span>
+                    {data ? (
+                      <span className="text-[11px] text-[#999]">
+                        {data.itemCount} item{data.itemCount === 1 ? '' : 's'} across {data.poCount} PO{data.poCount === 1 ? '' : 's'}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 mb-0 text-[12px] text-[#888]">{section.subtitle}</p>
+                </div>
+              </div>
+              {loading ? (
+                <TableSkeleton columns={ITEM_COLUMNS.map((c) => c.label)} rows={4} />
+              ) : data && data.preview.length ? (
+                <>
+                  <SectionTable rows={data.preview} />
+                  {data.itemCount > data.preview.length && (
+                    <p className="p-3 m-0 text-[11px] text-[#999] text-center">
+                      Showing {data.preview.length} of {data.itemCount} items &mdash; use the Reports section below for the full dataset.
+                    </p>
+                  )}
+                </>
+              ) : (
+                // Deliberately not the shared EmptyState component: that one
+                // renders a table row, and this branch sits in a plain div with
+                // no table, so a row element here would be relocated by the DOM
+                // parser and fail hydration.
+                <p className="p-6 m-0 text-center text-[12px] text-[#999]">
+                  Nothing in {section.title}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <ReportCards warehouse={selectedWarehouse} />
     </div>
   );
 }
