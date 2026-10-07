@@ -63,8 +63,22 @@ export function matchRequestItem<T extends { itemDescription: string }>(
 export interface MRSRequirementLine {
   itemDescription: string
   unit?: string | null
+  /**
+   * What the request asked for.
+   *
+   * REQUIRED, not optional: an optional one would silently fall back to
+   * `approvedQty`, which is the exact conflation this field exists to stop —
+   * a line requested at 100 and approved at 60 would report Requested 60.
+   */
+  requestedQty: number
   /** the approved quantity for this line — never a sum over POs */
   approvedQty: number
+  /**
+   * What the purchaser explicitly refused. Additive to `approvedQty` and never a
+   * replacement for it, so an approval gap can be read as still-outstanding
+   * rather than formally rejected.
+   */
+  rejectedQty: number
 }
 
 /** One PO's contribution to the MRS aggregate. */
@@ -85,8 +99,12 @@ export interface MRSPOContribution extends DiscrepancyCheckPO {
 export interface MRSLine {
   itemDescription: string
   unit: string
+  /** what the request asked for — carried, never recomputed from approved */
+  requestedQty: number
   /** the requirement's approved quantity, counted ONCE */
   approvedQty: number
+  /** the requirement's rejected quantity, counted ONCE */
+  rejectedQty: number
   /** summed across every PO on this MRS */
   purchasedQty: number
   /** summed across every PO on this MRS */
@@ -104,7 +122,9 @@ export interface MRSAggregate {
   sourceReqNumber: string | null
   lines: MRSLine[]
   totals: {
+    requested: number
     approved: number
+    rejected: number
     purchased: number
     received: number
     procurementOutstanding: number
@@ -149,10 +169,15 @@ export function resolveRequirementLines(
   if (requirementLines.length) return requirementLines
   const earliest = purchaseOrders[0]
   if (!earliest) return []
+  // No request behind this MRS: the PO's own snapshot is all there is. It stands
+  // in for both the requested and the approved figure, and nothing was rejected —
+  // so Requested and Approved read the same, which is honest rather than a gap.
   return earliest.items.map((i) => ({
     itemDescription: i.itemDescription,
     unit: i.unit,
+    requestedQty: i.qty,
     approvedQty: i.qty,
+    rejectedQty: 0,
   }))
 }
 
@@ -183,8 +208,11 @@ export function aggregateMRS(input: {
     const matched = contributions.filter((c) => c.key === key)
     // buildPOItemChain owns the two balances and the completion rule. The approved
     // side is the requirement; the purchased/received side is the MRS-wide sum.
+    // requestedQty used to be passed as `req.approvedQty`, which collapsed the two
+    // into one number — harmless while the field was unread, a lie the moment
+    // anything displayed it.
     const chain: POItemChain = buildPOItemChain({
-      requestedQty: req.approvedQty,
+      requestedQty: req.requestedQty,
       approvedQty: req.approvedQty,
       purchasedQty: sum(matched, (c) => c.item.purchasedQty ?? 0),
       receivedQty: sum(matched, (c) => c.item.receivedQty ?? 0),
@@ -192,7 +220,9 @@ export function aggregateMRS(input: {
     return {
       itemDescription: req.itemDescription,
       unit: req.unit ?? matched[0]?.item.unit ?? '',
+      requestedQty: chain.requestedQty,
       approvedQty: chain.approvedQty,
+      rejectedQty: req.rejectedQty,
       purchasedQty: chain.purchasedQty,
       receivedQty: chain.receivedQty,
       procurementOutstanding: chain.procurementOutstanding,
@@ -202,7 +232,9 @@ export function aggregateMRS(input: {
   })
 
   const totals = {
+    requested: sum(lines, (l) => l.requestedQty),
     approved: sum(lines, (l) => l.approvedQty),
+    rejected: sum(lines, (l) => l.rejectedQty),
     purchased: sum(lines, (l) => l.purchasedQty),
     received: sum(lines, (l) => l.receivedQty),
     procurementOutstanding: sum(lines, (l) => l.procurementOutstanding),

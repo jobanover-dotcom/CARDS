@@ -26,6 +26,7 @@ import {
 import { useWarehouseData } from '../../context/WarehouseDataContext';
 import { getRequests, getFollowUpMap } from '../../../actions/requests';
 import { getMRSProgress } from '../../../actions/procurement';
+import { requestApprovalOutstanding, REQUEST_STATUS } from '../../lib/requestApproval';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 const COLUMNS = ['Date', 'MRS No.', 'Items', 'Qty', 'Requested By', 'Approved', 'Balance', 'Status', 'MRS Progress', 'Action'];
@@ -95,12 +96,20 @@ function RequestsView() {
                       const totalQty = items.reduce((s, it) => s + it.qty, 0);
                       const hasApprovals = items.some((it) => it.approvedQty != null);
                       const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
-                      const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+                      const totalRejected = items.reduce((s, it) => s + (it.rejectedQty ?? 0), 0);
+                      // Requested minus BOTH decided quantities. Counting only the
+                      // approved side would leave a rejected remainder reading as
+                      // outstanding, and would keep offering a follow-up for
+                      // quantity the purchaser has already refused.
+                      const balance = totalApproved != null ? requestApprovalOutstanding(items) : null;
                       const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
                       const followUps = followUpMap[req.reqNumber] || [];
                       const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
                       const lastRejected = !blocking && followUps.length > 0 ? followUps[0] : null;
-                      const canFileFollowUp = req.status === 'Partially Approved' && balance > 0 && !blocking;
+                      // Gated on the outstanding balance, not the status string. A closed request
+                      // (remainder rejected) reports zero balance here, so the button
+                      // disappears without needing to know about "Approval Closed".
+                      const canFileFollowUp = req.status === REQUEST_STATUS.PARTIALLY_APPROVED.value && balance > 0 && !blocking;
                       // Procurement progress for THIS request's requirement, summed
                       // across every purchase order raised against it.
                       const progress = mrsProgress[req.mrsNo] ?? null;
@@ -134,8 +143,12 @@ function RequestsView() {
                           <td className={tdNum}>{totalQty}</td>
                           <td className={tdStrong}>{req.requestedBy}</td>
                           <td className={tdNum}>{totalApproved ?? '\u2014'}</td>
-                          <td className={balance > 0 ? tdNumOutstanding : tdNum}>
-                            {balance ?? '\u2014'}
+                          <td className={totalRejected > 0 ? tdNum : balance > 0 ? tdNumOutstanding : tdNum}>
+                            {/* When nothing was rejected this reads as the outstanding
+                                balance exactly as before; when something was, the
+                                rejected figure takes its place so the warehouse can see
+                                why the balance closed. */}
+                            {totalRejected > 0 ? `${totalRejected} rejected` : (balance ?? '\u2014')}
                           </td>
                           <td className="p-4 whitespace-nowrap"><StatusBadge status={req.status} /></td>
                           <td className="p-4 whitespace-nowrap">

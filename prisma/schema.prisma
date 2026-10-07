@@ -62,6 +62,7 @@ model PurchaseOrder {
   // were actually purchased against this PO. Optional — receiving never requires
   // one — but several may exist, one per receiving event.
   receipts PurchaseOrderReceipt[]
+  receivingRecords ReceivingRecord[]
   // Historical shipment records. The active workflow no longer creates
   // these — supplier delivery is external to CARDS. Read-only archive.
   deliveries Delivery[]
@@ -169,6 +170,7 @@ model WarehouseRequest {
   followUpOfReqNumber String?
   followUpOfPoNumber String?
   items WarehouseRequestItem[]
+  approvalLogs RequestApprovalLog[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -181,9 +183,73 @@ model WarehouseRequestItem {
   qty Int
   unit String
   approvedQty Int?
+  /// Quantity the purchaser explicitly refused and that must never be approved.
+  /// Additive to approvedQty, never a replacement: rejecting the remaining
+  /// balance of a 100/60 request leaves approvedQty at 60 and records 40 here,
+  /// which is what distinguishes "100 requested, 100 approved" from
+  /// "100 requested, 60 approved, 40 rejected".
+  rejectedQty Int @default(0)
   // Optional link to the standardized Item Catalog entry.
   itemId String?
   item Item? @relation(fields: [itemId], references: [id])
+  createdAt DateTime @default(now())
+  @@index([reqNumber])
+}
+
+// One line of one receiving event, recorded per arrival.
+//
+// DeliveryAuditLog.detail is prose — "Cement: 0 + 30 = 30 bags" — which is
+// readable in a history list but holds nothing a correction can be applied to.
+// Parsing it back is not safe: a description containing a colon or a space
+// changes its meaning. So receiving events also write these rows, which are what
+// the Record Receiving history renders and what an edit adjusts.
+//
+// `fromQty`/`toQty` are CUMULATIVE totals either side of this event, so the
+// running total is derived rather than stored twice. `fromQty` is also the floor
+// an edit may not go below: correcting a miscount downward is allowed, undoing
+// an entire earlier event is not.
+model ReceivingRecord {
+  id String @id @default(uuid())
+  /// Shared by every line written in one save, so an event groups cleanly
+  /// without depending on two rows sharing a timestamp.
+  eventId String
+  poNumber String
+  po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
+  poItemId String
+  itemDescription String
+  unit String
+  fromQty Int
+  toQty Int
+  actor String?
+  createdAt DateTime @default(now())
+  editedAt DateTime?
+  editedBy String?
+  /// The quantity before the edit, kept so the history can show what changed
+  /// rather than only what it now says.
+  previousToQty Int?
+  @@index([poNumber])
+  @@index([poNumber, createdAt])
+}
+
+// Approval decisions taken on a warehouse request.
+//
+// DeliveryAuditLog is PO-scoped (poNumber is NOT NULL), so request decisions
+// have no home there. Without this table a rejected balance is indistinguishable
+// from a never-decided one once approvedQty alone is all that survives.
+model RequestApprovalLog {
+  id String @id @default(uuid())
+  reqNumber String
+  request WarehouseRequest @relation(fields: [reqNumber], references: [reqNumber], onDelete: Cascade)
+  /// Null only for a whole-request decision that names no single line.
+  reqItemId String?
+  /// Snapshot of the line description, so history stays readable after a rename.
+  itemDescription String?
+  /// additional_approved | remaining_rejected
+  action String
+  /// Quantity this decision added to approvedQty or rejectedQty.
+  qty Int
+  reason String?
+  actor String?
   createdAt DateTime @default(now())
   @@index([reqNumber])
 }

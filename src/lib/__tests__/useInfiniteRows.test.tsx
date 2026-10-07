@@ -3,16 +3,22 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { useInfiniteRows } from '@/hooks/useInfiniteRows';
 
-// A paginated table has two different kinds of fetch, and the old hook treated
-// them as one. Every `replace` load set `initialLoading`, which is what views
-// branch on to decide between a skeleton and the real table. So a mutation —
-// approve, decline, delete, anything that bumps a version counter — flashed a
-// full skeleton over rows that were still perfectly readable, and hid the very
-// button the reader had just pressed.
+// A paginated table triggers a fetch for two unrelated reasons, and the two must
+// not look alike on screen.
 //
-// These tests pin the distinction: a skeleton only while there is genuinely
-// nothing to show, and a refetch that replaces from offset 0 must not truncate a
-// list the reader has already scrolled through.
+//   FILTER or SEARCH  the reader asks a new question. The rows on screen answer
+//                     the previous one, so placeholders stand in while the new
+//                     answer is in flight.
+//   MUTATION          the reader acts on what is already there — a delete, an
+//                     approval, a save. What is visible is still true, so it
+//                     stays put and refreshes behind. Blanking it would hide the
+//                     very button they had just pressed.
+//
+// Every `replace` load used to set `initialLoading`, which is what views branch on
+// to choose between a skeleton and the real table. That made a delete flash a
+// full skeleton over readable rows; treating every refetch as a mutation later
+// removed the feedback from filtering instead. These tests pin both halves from
+// opposite directions, plus the paging behaviour neither should disturb.
 
 function rows(n: number, prefix = 'r') {
   return Array.from({ length: n }, (_, i) => ({ id: `${prefix}-${i}` }));
@@ -94,23 +100,107 @@ describe('useInfiniteRows', () => {
     expect(result.current.rows).toHaveLength(30);
   })
 
-  it('keeps rows visible across a filter change rather than blanking the table', async () => {
+  it('shows the skeleton across a filter change, because the rows answer a different question', async () => {
     let page = rows(5, 'unfiltered');
-    const fetcher = vi.fn(async () => ({ rows: page, total: 5 }));
+    // The second fetch is held open so the mid-flight state is observable.
+    let release: (() => void) | null = null;
+    const fetcher = vi.fn(async () => {
+      if (fetcher.mock.calls.length > 1) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { rows: page, total: 5 };
+    });
     const { result, rerender } = renderHook(({ status }) => useInfiniteRows(fetcher, { status }, 0), {
       initialProps: { status: undefined as string | undefined },
     });
     await waitFor(() => expect(result.current.rows).toHaveLength(5));
+    expect(result.current.initialLoading).toBe(false);
 
+    // The reader taps a filter. The rows on screen were the answer to the
+    // PREVIOUS question, so they must not stand in for this one.
     page = rows(2, 'rejected');
     await act(async () => {
       rerender({ status: 'Rejected' });
       await Promise.resolve();
     });
+    await waitFor(() => expect(release).not.toBeNull());
 
-    expect(result.current.initialLoading).toBe(false);
-    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(result.current.initialLoading).toBe(true);
+    expect(result.current.refreshing).toBe(true);
+
+    await act(async () => {
+      release!();
+    });
+    await waitFor(() => expect(result.current.initialLoading).toBe(false));
+    expect(result.current.rows).toHaveLength(2);
     expect(result.current.rows[0].id).toBe('rejected-0');
+  })
+
+  it('does not re-show the skeleton when a version bump lands on the same params', async () => {
+    // The other half of the split. A delete is the reader acting on what is
+    // already on screen, so the table must stay put — this is the case the
+    // sibling test above covers, and the two must not drift together.
+    let release: (() => void) | null = null;
+    const fetcher = vi.fn(async () => {
+      if (fetcher.mock.calls.length > 1) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { rows: rows(4, 'first'), total: 4 };
+    });
+    const { result, rerender } = renderHook(
+      ({ status, v }) => useInfiniteRows(fetcher, { status }, v),
+      { initialProps: { status: 'Pending', v: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(4));
+
+    await act(async () => {
+      rerender({ status: 'Pending', v: 1 });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(release).not.toBeNull());
+
+    // Params identical, so this is a mutation: no skeleton, rows untouched.
+    expect(result.current.initialLoading).toBe(false);
+
+    await act(async () => {
+      release!();
+    });
+    await waitFor(() => expect(result.current.refreshing).toBe(false));
+  })
+
+  it('treats a search term as a filter change', async () => {
+    // Search travels through `params` exactly as a filter does, so it earns the
+    // skeleton on the same terms.
+    let release: (() => void) | null = null;
+    const fetcher = vi.fn(async () => {
+      if (fetcher.mock.calls.length > 1) {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return { rows: rows(3, 'page'), total: 3 };
+    });
+    const { result, rerender } = renderHook(
+      ({ search, v }) => useInfiniteRows(fetcher, { search }, v),
+      { initialProps: { search: undefined as string | undefined, v: 0 } },
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(3));
+
+    await act(async () => {
+      rerender({ search: 'cement', v: 0 });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(release).not.toBeNull());
+
+    expect(result.current.initialLoading).toBe(true);
+    await act(async () => {
+      release!();
+    });
+    await waitFor(() => expect(result.current.initialLoading).toBe(false));
   })
 
   it('appends rather than replaces when loading more', async () => {

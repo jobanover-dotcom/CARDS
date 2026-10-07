@@ -1,5 +1,6 @@
 'use server';
 
+import { randomUUID } from 'crypto';
 import { prisma, runTx } from '@/lib/prisma';
 import type { Prisma, WarehouseRequest } from '@prisma/client';
 import { getCurrentUser } from './auth';
@@ -18,6 +19,7 @@ import {
   IN_PROGRESS_FILTER_KEYS,
   PO_BUCKET_KEYS,
   PO_PROGRESS_LABEL,
+  approvalOutstandingQty,
   assertPurchasedNotReduced,
   assertReceivedNotReduced,
   assertValidPurchasedQty,
@@ -33,8 +35,19 @@ import {
   type POProgressFilter,
   type POProgressStatus,
 } from '@/src/lib/deliveryQuantities';
-import { createFollowUpPOSchema, recordReceivingSchema, savePurchaseSchema } from '@/src/lib/validations/delivery';
-import { aggregateMRS, matchRequestItem, normalizeItemDescription, type MRSAggregate } from '@/src/lib/mrsAggregates';
+import {
+  createFollowUpPOSchema,
+  editReceivingSchema,
+  recordReceivingSchema,
+  savePurchaseSchema,
+} from '@/src/lib/validations/delivery';
+import {
+  aggregateMRS,
+  matchRequestItem,
+  normalizeItemDescription,
+  type MRSLine,
+  type MRSAggregate,
+} from '@/src/lib/mrsAggregates';
 import {
   mrsItemAllowanceOf,
   mrsTotalsOf,
@@ -854,7 +867,7 @@ export async function getPOBucketPage(options: POBucketPageOptions = {}): Promis
   // action can never be offered for more than the server allows.
   const aggregates = await readMRSAggregates(prisma, page.map((c) => c.row.mrsNo));
   const NO_REQUIREMENT: MRSRequirementTotals = {
-    approved: 0, purchased: 0, received: 0,
+    requested: 0, approved: 0, rejected: 0, purchased: 0, received: 0,
     procurementOutstanding: 0, receivingOutstanding: 0, sourceReqNumber: null,
   };
 
@@ -912,6 +925,15 @@ export interface MRSGroupRow {
    * totals drive the MRS row's headline and nothing else.
    */
   totals: MRSRequirementTotals;
+  /**
+   * Per-item requirement figures: requested, approved, rejected, and the
+   * purchased/received totals summed across this MRS's purchase orders.
+   *
+   * Served from the aggregate this page ALREADY reads for `totals`, so exposing
+   * the lines costs no additional query and no second matching algorithm. The
+   * modal this feeds therefore cannot drift from the numbers on the row above it.
+   */
+  lines: MRSLine[];
   complete: boolean;
   /** the aggregate's quantity stage, derived by the same helper a PO uses */
   progressStage: POProgressStatus;
@@ -989,6 +1011,7 @@ export async function getMRSGroupedPage(options: MRSGroupPageOptions = {}): Prom
       sourceReqNumber: aggregate.sourceReqNumber,
       requisitioner: members[0].row.requisitioner,
       totals,
+      lines: aggregate.lines,
       complete: aggregate.complete,
       progressStage: aggregate.progressStage,
       bucket: aggregate.bucket,
@@ -1277,6 +1300,10 @@ export interface ReportRequestItemRow {
   unit: string;
   requestedQty: number;
   approvedQty: number | null;
+  /** Quantity the purchaser explicitly refused and that will never be approved. */
+  rejectedQty: number;
+  /** requested - approved - rejected. Zero once the approval stage is closed. */
+  approvalOutstanding: number;
   poNumber: string | null;
   poItemId: string | null;
   poDate: string | null;
@@ -1370,6 +1397,8 @@ async function materialRequestRows(
         // The request records no approver and no approval timestamp; approvedBy
         // below comes from the linked PO, and no approval date is invented.
         approvedQty: item.approvedQty,
+        rejectedQty: item.rejectedQty ?? 0,
+        approvalOutstanding: approvalOutstandingQty(item.qty, item.approvedQty, item.rejectedQty ?? 0),
         poNumber: po?.poNumber ?? null,
         poItemId: match?.id ?? null,
         poDate: po?.date ?? null,
@@ -1915,7 +1944,17 @@ export async function recordReceiving(input: {
         throw new Error('A submitted item does not belong to this purchase order');
     }
 
-    const deltas: { itemDescription: string; from: number; to: number; unit: string }[] = [];
+    // One id shared by every line of this save, so the history groups them as a
+    // single event without depending on two rows sharing a timestamp.
+    const eventId = randomUUID();
+
+    const deltas: {
+      poItemId: string;
+      itemDescription: string;
+      from: number;
+      to: number;
+      unit: string;
+    }[] = [];
     for (const item of po.items) {
       if (!inputMap.has(item.id)) continue;
       const nextQty = inputMap.get(item.id)!;
@@ -1927,13 +1966,32 @@ export async function recordReceiving(input: {
       assertReceivedNotReduced(nextQty, item.receivedQty, item.itemDescription);
       assertValidReceivedQty(nextQty, purchasedQty, item.itemDescription);
       if (nextQty === item.receivedQty) continue;
+      // Captured BEFORE the write. fromQty is what makes a later edit safe: it is
+      // the floor a corrected total may not fall below, so an edit can fix a
+      // miscount without undoing an earlier delivery. Reading it after the update
+      // would record the new total as both bounds and make the history vacuous.
+      const fromQty = item.receivedQty;
       await tx.purchaseOrderItem.update({
         where: { id: item.id },
         data: { receivedQty: nextQty },
       });
+      // The structured counterpart to the prose audit line below.
+      await tx.receivingRecord.create({
+        data: {
+          eventId,
+          poNumber: po.poNumber,
+          poItemId: item.id,
+          itemDescription: item.itemDescription,
+          unit: item.unit,
+          fromQty,
+          toQty: nextQty,
+          actor: user.username,
+        },
+      });
       deltas.push({
+        poItemId: item.id,
         itemDescription: item.itemDescription,
-        from: item.receivedQty,
+        from: fromQty,
         to: nextQty,
         unit: item.unit,
       });
@@ -2012,5 +2070,237 @@ export async function getPOAuditLog(poNumber: string, limit = 50) {
     where: { poNumber },
     orderBy: { createdAt: 'desc' },
     take: limit,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Receiving history, and correcting the latest event on it.
+//
+// The history is read from ReceivingRecord rather than from the prose audit
+// detail, because a correction has to be applied to numbers. Events recorded
+// before the structured table existed are backfilled from that prose where it
+// parses cleanly; anything that did not parse keeps its audit line and is shown
+// read-only, because a guessed quantity is worse than no edit at all.
+// ---------------------------------------------------------------------------
+
+export interface ReceivingHistoryLine {
+  poItemId: string;
+  itemDescription: string;
+  unit: string;
+  fromQty: number;
+  toQty: number;
+  /** What this event added. */
+  delta: number;
+  edited: boolean;
+  editedBy: string | null;
+  editedAt: string | null;
+  /** The quantity before the edit, so the row can show what changed. */
+  previousToQty: number | null;
+}
+
+export interface ReceivingHistoryEvent {
+  eventId: string;
+  createdAt: string;
+  actor: string | null;
+  lines: ReceivingHistoryLine[];
+  /** Only the newest event may be edited: an earlier one would invalidate later ones. */
+  editable: boolean;
+}
+
+/**
+ * Receiving events for a PO, newest first.
+ *
+ * Events with no ReceivingRecord rows are omitted rather than reconstructed from
+ * the prose audit line: they still appear in getPOAuditLog, so nothing is hidden,
+ * but a value that has to be guessed cannot also be safely corrected.
+ */
+export async function getReceivingHistory(poNumber: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { poNumber },
+    select: { warehouse: true },
+  });
+  if (!po) throw new Error('Purchase order not found');
+  if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+
+  const rows = await prisma.receivingRecord.findMany({
+    where: { poNumber },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  // Group by eventId, preserving the newest-first order of the rows themselves.
+  const byEvent = new Map<string, ReceivingHistoryEvent>();
+  for (const row of rows) {
+    let event = byEvent.get(row.eventId);
+    if (!event) {
+      event = {
+        eventId: row.eventId,
+        createdAt: row.createdAt.toISOString(),
+        actor: row.actor,
+        lines: [],
+        editable: false,
+      };
+      byEvent.set(row.eventId, event);
+    }
+    event.lines.push({
+      poItemId: row.poItemId,
+      itemDescription: row.itemDescription,
+      unit: row.unit,
+      fromQty: row.fromQty,
+      toQty: row.toQty,
+      delta: Math.max(0, row.toQty - row.fromQty),
+      edited: row.editedAt != null,
+      editedBy: row.editedBy,
+      editedAt: row.editedAt ? row.editedAt.toISOString() : null,
+      previousToQty: row.previousToQty,
+    });
+  }
+
+  const events = [...byEvent.values()];
+  // Exactly one event is editable: the most recent. Anything earlier has later
+  // events resting on the totals it established.
+  if (events.length > 0) events[0].editable = true;
+  return events;
+}
+
+/**
+ * Correct the quantities recorded by the LATEST receiving event on a purchase
+ * order.
+ *
+ * This is the one path that may LOWER a received total — recordReceiving refuses
+ * to, which is right for recording new arrivals. The floor is the event's own
+ * `fromQty`, the total that was already standing before it: a miscount can be
+ * corrected, but a whole earlier delivery cannot be quietly undone.
+ *
+ * Everything is re-derived inside one transaction from stored rows, so a stale
+ * form cannot push a total past what was actually purchased.
+ */
+export async function editLatestReceiving(input: unknown) {
+  const parsed = editReceivingSchema.parse(input);
+  return runTx(async (tx) => {
+    await lockPO(tx, parsed.poNumber);
+    const po = await tx.purchaseOrder.findUnique({
+      where: { poNumber: parsed.poNumber },
+      include: { items: true },
+    });
+    if (!po) throw new Error('Purchase order not found');
+    const user = await assertWarehouseOwns(po.warehouse);
+    if (poLifecycle(po.status) === PO_STATUS.CANCELLED.value)
+      throw new Error('This purchase order is cancelled');
+
+    const latest = await tx.receivingRecord.findFirst({
+      where: { poNumber: parsed.poNumber },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!latest)
+      throw new Error('There is no receiving history on this purchase order to edit');
+
+    const eventRows = await tx.receivingRecord.findMany({
+      where: { poNumber: parsed.poNumber, eventId: latest.eventId },
+    });
+
+    const itemById = new Map(po.items.map((i) => [i.id, i]));
+    const deltas: { itemDescription: string; from: number; to: number; unit: string }[] = [];
+
+    for (const entry of parsed.items) {
+      const row = eventRows.find((r) => r.poItemId === entry.poItemId);
+      if (!row)
+        throw new Error(
+          'Only the most recent receiving event can be edited, and every line must belong to it',
+        );
+      const item = itemById.get(entry.poItemId);
+      if (!item) throw new Error('A submitted item does not belong to this purchase order');
+
+      const purchasedQty = item.purchasedQty ?? 0;
+      // Same ceiling as recording a delivery: never more than was bought.
+      assertValidReceivedQty(entry.toQty, purchasedQty, item.itemDescription);
+      // And never below what was already received before this event.
+      if (entry.toQty < row.fromQty) {
+        throw new Error(
+          `Received quantity for "${item.itemDescription}" cannot be corrected below the ${row.fromQty} ${row.unit} already received before that delivery`,
+        );
+      }
+      if (entry.toQty === row.toQty) continue;
+
+      // Captured before the update, so the audit line reads 30 → 25 rather than
+      // the post-write total on both sides.
+      const previousQty = row.toQty;
+
+      // previousToQty is only stamped on the FIRST edit, so a second correction
+      // still shows the originally recorded figure rather than the last edit's.
+      await tx.receivingRecord.update({
+        where: { id: row.id },
+        data: {
+          toQty: entry.toQty,
+          previousToQty: row.previousToQty ?? previousQty,
+          editedAt: new Date(),
+          editedBy: user.username,
+        },
+      });
+      await tx.purchaseOrderItem.update({
+        where: { id: item.id },
+        data: { receivedQty: entry.toQty },
+      });
+      deltas.push({
+        itemDescription: item.itemDescription,
+        from: previousQty,
+        to: entry.toQty,
+        unit: item.unit,
+      });
+    }
+
+    if (!deltas.length) return { po, tracker: await buildTrackerTx(tx, parsed.poNumber) };
+
+    await audit(tx, {
+      poNumber: parsed.poNumber,
+      action: 'receiving_edited',
+      detail: deltas
+        .map((d) => `${d.itemDescription}: ${d.from} → ${d.to} ${d.unit}`)
+        .join('; '),
+      actor: user.username,
+    });
+
+    // An edit can take a purchase order out of Completed, or bring it back in.
+    // Completion is recomputed from every line, never from the edited one alone.
+    const trackerBefore = await buildTrackerTx(tx, parsed.poNumber);
+    const lifecycle = poLifecycle(po.status);
+    let updated = po;
+    if (trackerBefore.canComplete && lifecycle !== PO_STATUS.COMPLETED.value) {
+      updated = await tx.purchaseOrder.update({
+        where: { poNumber: parsed.poNumber },
+        data: {
+          status: PO_STATUS.COMPLETED.value,
+          statusLabel: poStatusLabel(PO_STATUS.COMPLETED.value),
+        },
+      });
+      await audit(tx, {
+        poNumber: parsed.poNumber,
+        action: 'po_completed',
+        detail: 'Every PO item is fully purchased and fully received',
+        actor: user.username,
+      });
+    } else if (
+      lifecycle === PO_STATUS.COMPLETED.value &&
+      !trackerBefore.canComplete
+    ) {
+      // Reopened by the correction. Completed is derived from quantities, so it
+      // cannot be left standing over an incomplete requirement.
+      updated = await tx.purchaseOrder.update({
+        where: { poNumber: parsed.poNumber },
+        data: {
+          status: PO_STATUS.IN_PROGRESS.value,
+          statusLabel: poStatusLabel(PO_STATUS.IN_PROGRESS.value),
+        },
+      });
+      await audit(tx, {
+        poNumber: parsed.poNumber,
+        action: 'po_reopened',
+        detail: 'A corrected receiving quantity left items outstanding',
+        actor: user.username,
+      });
+    }
+
+    return { po: updated, tracker: await buildTrackerTx(tx, parsed.poNumber) };
   });
 }

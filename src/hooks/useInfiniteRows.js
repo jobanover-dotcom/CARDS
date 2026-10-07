@@ -29,17 +29,21 @@ export function useInfiniteRows(fetcher, params = {}, version = 0) {
   }, []);
 
   const load = useCallback(
-    async ({ replace }) => {
+    async ({ replace, showSkeleton }) => {
       const fetchId = ++fetchIdRef.current;
       if (replace) {
         offsetRef.current = 0;
-        // A skeleton means "there is nothing to show yet". A refetch caused by a
-        // mutation, or by a filter/search change, means the opposite: what is on
-        // screen is stale but still true, so it stays put and is refreshed
-        // behind. Only a genuinely empty table shows placeholders — otherwise a
-        // one-row change behind a delete swapped the whole table out from under
-        // the reader, hiding the button they had just pressed.
-        setInitialLoading(rowsRef.current.length === 0);
+        // Two different fetches, and they must not look alike on screen.
+        //
+        // A FILTER OR SEARCH change (`showSkeleton`) is the reader asking a new
+        // question. The rows on screen answer the previous one, so they are
+        // replaced by placeholders while the new answer is in flight.
+        //
+        // A MUTATION — a delete, an approval, a save — is the reader acting on
+        // what is already on screen. What is visible stays true, so it stays put
+        // and is refreshed behind. Blanking it would hide the very button they
+        // had just pressed.
+        setInitialLoading(Boolean(showSkeleton) || rowsRef.current.length === 0);
         setRefreshing(true);
       } else {
         setLoadingMore(true);
@@ -73,10 +77,19 @@ export function useInfiniteRows(fetcher, params = {}, version = 0) {
   // Fetch-on-params-change is this hook's contract: deps are keyed on the
   // serialized paramsKey/version (caller param objects are re-created each
   // render, so fetcher/params identity is not a stable signal).
+  //
+  // `paramsKey` and `version` both trigger a fetch but mean different things, so
+  // the effect records which one moved and tells `load` whether to show a
+  // skeleton. A version bump with identical params is a mutation, and must not
+  // blank the table.
+  //
   // TanStack Query is the long-term replacement (see playbooks/).
   /* eslint-disable react-hooks/exhaustive-deps -- fetch effect by design */
+  const previousParamsKey = useRef(paramsKey);
   useEffect(() => {
-    load({ replace: true });
+    const filterChanged = previousParamsKey.current !== paramsKey;
+    previousParamsKey.current = paramsKey;
+    load({ replace: true, showSkeleton: filterChanged });
   }, [paramsKey, version]);
   /* eslint-enable react-hooks/exhaustive-deps */
 

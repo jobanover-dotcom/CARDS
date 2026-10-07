@@ -70,6 +70,23 @@ export function receivingOutstandingQty(
   return Math.max(0, (purchasedQty ?? 0) - (receivedQty ?? 0))
 }
 
+/**
+ * Approval shortfall belongs to the purchaser: what is requested but neither
+ * approved nor rejected yet. This is the Request section's Follow-up Approval
+ * allowance, and it is deliberately independent of the procurement balance —
+ * rejected units must never re-enter it, which is why rejectedQty is subtracted
+ * here rather than just left out of approvedQty.
+ */
+export function approvalOutstandingQty(
+  requestedQty: number | null | undefined,
+  approvedQty: number | null | undefined,
+  rejectedQty: number | null | undefined,
+): number {
+  const requested = Math.max(0, requestedQty ?? 0)
+  const decided = Math.max(0, approvedQty ?? 0) + Math.max(0, rejectedQty ?? 0)
+  return Math.max(0, requested - decided)
+}
+
 export function buildPOItemChain(input: POItemChainInput): POItemChain {
   const requestedQty = Math.max(0, input.requestedQty ?? 0)
   const approvedQty = Math.max(0, input.approvedQty ?? 0)

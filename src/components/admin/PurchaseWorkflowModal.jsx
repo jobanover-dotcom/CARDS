@@ -31,6 +31,8 @@ const labelClass = 'text-[11px] font-bold text-[#444]';
 const HISTORY_LABELS = {
   purchase_saved: 'Purchase saved',
   follow_up_raised: 'Follow-up PO raised',
+  receiving_edited: 'Receiving corrected',
+  po_reopened: 'PO reopened',
   supplier_set: 'Supplier set',
   supplier_changed: 'Supplier changed',
   receiving_recorded: 'Receiving recorded',

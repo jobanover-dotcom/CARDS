@@ -10,6 +10,7 @@ import SupplierReceiptsModal from '../shared/SupplierReceiptsModal';
 import POCreationForm from './POCreationForm';
 import PORow, { PO_COL_SPAN } from './PORow';
 import PurchaseWorkflowModal from './PurchaseWorkflowModal';
+import MRSItemsModal from './MRSItemsModal';
 import StatusBadge from '../ui/StatusBadge';
 import PageSkeleton from '../ui/PageSkeleton';
 import TableSkeleton from '../ui/TableSkeleton';
@@ -137,7 +138,7 @@ const MRS_HEADINGS = {
  * and its children sharing one row style made the hierarchy invisible — you
  * could not tell which PO belonged to which request without reading the numbers.
  */
-function MRSTopRow({ group, expanded, striped, onToggle }) {
+function MRSTopRow({ group, expanded, striped, onToggle, onTrack }) {
   const statusLabel = group.hasDiscrepancy
     ? 'Discrepancy'
     : PO_PROGRESS_LABEL[group.progressStage];
@@ -176,11 +177,29 @@ function MRSTopRow({ group, expanded, striped, onToggle }) {
         {statusLabel ? <StatusBadge status={statusLabel} /> : <span className="text-[#bbb]">&mdash;</span>}
       </td>
       <td className="p-4 whitespace-nowrap text-[12px] text-[#555]">
-        {t.procurementOutstanding > 0
-          ? `${t.procurementOutstanding} to purchase`
-          : t.receivingOutstanding > 0
-            ? `${t.receivingOutstanding} to receive`
-            : 'Nothing outstanding'}
+        <div className="flex items-center gap-2">
+          <span>
+            {t.procurementOutstanding > 0
+              ? `${t.procurementOutstanding} to purchase`
+              : t.receivingOutstanding > 0
+                ? `${t.receivingOutstanding} to receive`
+                : 'Nothing outstanding'}
+          </span>
+          {/* The headline above is one general quantity for the whole requirement.
+              This opens the per-item breakdown behind it. stopPropagation is
+              required: the row itself toggles the expand, and without it one click
+              would both drill in and collapse the purchase orders. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onTrack(group.mrsNo);
+            }}
+            className="py-1 px-2 bg-white text-[#006680] border border-[#80c0d0] rounded text-[11px] font-semibold cursor-pointer transition-colors duration-200 hover:bg-[#e8f4f6] hover:border-[#006680]"
+          >
+            Track
+          </button>
+        </div>
       </td>
     </tr>
   );
@@ -212,11 +231,19 @@ function PurchaseOrderContent() {
   const [followUp, setFollowUp] = useState(null);
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [followUpError, setFollowUpError] = useState(null);
+  // A PO raised from a Follow-up Approval decision. Distinct from `followUp`
+  // (Follow-up Purchase, seeded from the MRS) and from `initialFormData`
+  // (a first PO raised while approving): this one must not write an approval.
+  const [approvalPO, setApprovalPO] = useState(null);
   // One PO expanded at a time: the detail panel is the source of truth for one
   // PO, so opening a second would just hide the first. Kept separate from the
   // expanded MRS rows so nesting stays readable.
   const [expandedPoNumber, setExpandedPoNumber] = useState(null);
   const [expandedMrsNo, setExpandedMrsNo] = useState(null);
+  // The material request whose per-item breakdown is open. Held as the MRS number
+  // rather than the row object so the modal always reads the latest rows after a
+  // purchase, a save or a receiving correction re-fetches the page.
+  const [trackedMrsNo, setTrackedMrsNo] = useState(null);
   // Section counts come from the SAME call that prices the rows, so a card can
   // never disagree with the list beneath it.
   const [counts, setCounts] = useState(null);
@@ -266,6 +293,26 @@ function PurchaseOrderContent() {
   const mrsGroups = view === 'mrs' ? pageRows : [];
 
   useEffect(() => {
+    // Follow-up Approval handoff. Seeded with the APPROVAL DELTA just granted,
+    // keyed by request item id. It must NOT reuse the openPOModal branch below:
+    // that one sets sourceReqNumber, which makes POCreationForm treat the seeded
+    // quantity as the approval and rewrite approvedQty with the delta.
+    const approvalReqNumber = searchParams.get('approvalPO');
+    if (approvalReqNumber) {
+      let items = [];
+      try { items = JSON.parse(searchParams.get('items') || '[]'); } catch { items = []; }
+      setApprovalPO({
+        reqNumber: approvalReqNumber,
+        items: items.filter((i) => Number.isFinite(i?.qty) && i.qty > 0 && i?.id),
+        requisitioner: searchParams.get('requisitioner') || '',
+        mrsNo: searchParams.get('mrsNo') || '',
+        warehouse: searchParams.get('requestWarehouse') || '',
+        approvedBy: searchParams.get('approvedBy') || '',
+        approvalDate: searchParams.get('approvalDate') || '',
+      });
+      setShowModal(true);
+      return;
+    }
     if (searchParams.get('openPOModal') === 'true') {
       let items = [];
       let itemApprovals = [];
@@ -363,6 +410,11 @@ function PurchaseOrderContent() {
   // shown, because it is the only information available at that point.
   const awaitingCurrentView = initialLoading || (!error && loadedView !== view);
 
+  // Read from the rows on screen rather than captured when the button was clicked,
+  // so a purchase or a receiving correction made while the modal is open cannot
+  // leave it showing figures the page has already moved on from.
+  const trackedGroup = trackedMrsNo ? mrsGroups.find((g) => g.mrsNo === trackedMrsNo) : null;
+
   return (
     <div className="bg-white rounded-lg p-6">
       <div className="mb-8">
@@ -387,7 +439,7 @@ function PurchaseOrderContent() {
       </div>
 
       <div className="mb-6">
-        <button className="bg-white text-[#0288d1] border-2 border-[#7ec8e3] py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer transition-all duration-300 inline-flex items-center gap-2 hover:bg-[#f0f8fc] hover:border-[#0288d1] hover:-translate-y-0.5 hover:shadow-[0_2px_8px_rgba(2,136,209,0.15)] active:translate-y-0" onClick={() => setShowModal(true)}>
+        <button className="bg-white text-[#0288d1] border-2 border-[#7ec8e3] py-2.5 px-5 rounded-md text-sm font-semibold cursor-pointer transition-all duration-300 inline-flex items-center gap-2 hover:bg-[#f0f8fc] hover:border-[#0288d1] hover:-translate-y-0.5 hover:shadow-[0_2px_8px_rgba(2,136,209,0.15)] active:translate-y-0" onClick={() => { setApprovalPO(null); setInitialFormData(null); setShowModal(true); }}>
           New purchase order
         </button>
       </div>
@@ -451,6 +503,7 @@ function PurchaseOrderContent() {
                             expanded={expandedMrsNo === group.mrsNo}
                             striped={index % 2 === 0}
                             onToggle={() => toggleExpandedMrs(group.mrsNo)}
+                            onTrack={(mrsNo) => setTrackedMrsNo(mrsNo)}
                           />
                           {expandedMrsNo === group.mrsNo && group.pos.map((order) => (
                             <PORow
@@ -509,8 +562,16 @@ function PurchaseOrderContent() {
         <p className="mt-3 mb-0 text-[13px] text-[#c62828] font-semibold">{followUpError}</p>
       )}
 
-      {showModal && (
+      {showModal && !approvalPO && (
         <POCreationForm onClose={() => { setShowModal(false); setInitialFormData(null); }} onSuccess={() => setShowSuccessModal(true)} initialData={initialFormData} />
+      )}
+
+      {showModal && approvalPO && (
+        <POCreationForm
+          initialData={{ approvalPO }}
+          onClose={() => { setShowModal(false); setApprovalPO(null); }}
+          onSuccess={() => { setShowModal(false); setApprovalPO(null); setShowSuccessModal(true); }}
+        />
       )}
 
       {/* Follow-up Purchase reuses the PO creation form, so there is no second
@@ -518,6 +579,11 @@ function PurchaseOrderContent() {
       {followUp && (
         <POCreationForm initialData={followUp} onClose={() => setFollowUp(null)} onSuccess={() => setFollowUp(null)} />
       )}
+
+      {/* The per-item breakdown behind an MRS row's general quantity. Resolved from
+          the rows already on the page — no fetch — so it cannot show figures the
+          row above disagrees with. */}
+      {trackedGroup && <MRSItemsModal group={trackedGroup} onClose={() => setTrackedMrsNo(null)} />}
 
       {showSuccessModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in">

@@ -32,6 +32,7 @@ import {
   IN_PROGRESS_LIFECYCLE_STATUSES,
   poDisplayLabel,
 } from '../../lib/deliveryStatus';
+import { requestApprovalOutstanding, REQUEST_STATUS } from '../../lib/requestApproval';
 
 // History is READ-ONLY, and it is two separate records of two separate things.
 //
@@ -345,8 +346,11 @@ function HistoryView() {
                       const totalQty = items.reduce((s, it) => s + it.qty, 0);
                       const hasApprovals = items.some((it) => it.approvedQty != null);
                       const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
-                      const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
-                      const rejected = req.status === 'Rejected';
+                      const totalRejected = items.reduce((s, it) => s + (it.rejectedQty ?? 0), 0);
+                      // Requested minus approved minus rejected, so a closed request
+                      // reads as closed here too rather than carrying a phantom balance.
+                      const balance = totalApproved != null ? requestApprovalOutstanding(items) : null;
+                      const rejected = req.status === REQUEST_STATUS.REJECTED.value;
                       return (
                         <tr
                           key={req.reqNumber ?? index}
@@ -362,7 +366,9 @@ function HistoryView() {
                           <td className={tdStrong}>{req.requestedBy}</td>
                           <td className={tdEl}>{req.requisitioner}</td>
                           <td className={`p-4 font-medium whitespace-nowrap text-right tabular-nums ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
-                            {totalApproved == null ? '\u2014' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                            {totalApproved == null
+                              ? '\u2014'
+                              : `${totalApproved} / ${totalQty}${totalRejected > 0 ? ` · rej ${totalRejected}` : ''}${balance > 0 ? ` · bal ${balance}` : ''}`}
                           </td>
                           <td className="p-4 whitespace-nowrap"><StatusBadge status={req.status} /></td>
                         </tr>

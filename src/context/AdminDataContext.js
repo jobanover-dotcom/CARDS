@@ -1,8 +1,8 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { getPOStats, createPO as createPOServer, createPOWithApproval, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
+import { getPOStats, createPO as createPOServer, createPOWithApproval, createPOFromApprovedRequest as createPOFromApprovedRequestServer, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
 import { savePurchase as savePurchaseServer, createFollowUpPO as createFollowUpPOServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer } from '../../actions/procurement';
-import { getRequestCounts, approveRequestPartial, declineRequest, deleteRequest as deleteRequestServer } from '../../actions/requests';
+import { getRequestCounts, approveRequestPartial, declineRequest, deleteRequest as deleteRequestServer, approveRemaining as approveRemainingServer, rejectRemaining as rejectRemainingServer } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
 import { deleteWarehouseWithArchive } from '../../actions/archive';
@@ -20,7 +20,7 @@ export function AdminDataProvider({ children }) {
   const [warehouses, setWarehouses] = useState([]);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [workload, setWorkload] = useState(EMPTY_WORKLOAD);
-  const [requestCounts, setRequestCounts] = useState({ total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0 });
+  const [requestCounts, setRequestCounts] = useState({ total: 0, pending: 0, rejected: 0, approved: 0, partiallyApproved: 0, approvalClosed: 0 });
   const [loading, setLoading] = useState(true);
   const [poVersion, setPoVersion] = useState(0);
   const [requestVersion, setRequestVersion] = useState(0);
@@ -107,6 +107,26 @@ export function AdminDataProvider({ children }) {
     await refreshRequestCounts();
   }, [refreshRequestCounts]);
 
+  // Follow-up Approval settles `requested - approved - rejected` on the request
+  // itself. It never touches a purchase order, but it DOES change the approved
+  // quantity the PO section's allowance is derived from, so both versions move
+  // and both sets of cards refresh.
+  const approveRemaining = useCallback(async (input) => {
+    const result = await approveRemainingServer(input);
+    setRequestVersion(v => v + 1);
+    setPoVersion(v => v + 1);
+    await Promise.all([refreshRequestCounts(), refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshRequestCounts, refreshStats, refreshWorkload]);
+
+  const rejectRemaining = useCallback(async (input) => {
+    const result = await rejectRemainingServer(input);
+    setRequestVersion(v => v + 1);
+    setPoVersion(v => v + 1);
+    await Promise.all([refreshRequestCounts(), refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshRequestCounts, refreshStats, refreshWorkload]);
+
   // A removed request changes both the table and the stat cards, so the version
   // bump refetches the rows while the explicit count refresh keeps the totals in
   // step. Without the latter the cards would still count the deleted request.
@@ -159,6 +179,18 @@ export function AdminDataProvider({ children }) {
     return result;
   }, [refreshStats, refreshWorkload]);
 
+  // The second half of Follow-up Approval: raises a NEW PO for the quantity an
+  // approval just released. The approval itself is already recorded, so this does
+  // not touch the request — but the new PO changes what the PO section shows, and
+  // the MRS the request belongs to now has another member, so both versions move.
+  const createPOFromApprovedRequest = useCallback(async (input) => {
+    const result = await createPOFromApprovedRequestServer(input);
+    setPoVersion(v => v + 1);
+    setRequestVersion(v => v + 1);
+    await Promise.all([refreshStats(), refreshWorkload(), refreshRequestCounts()]);
+    return result;
+  }, [refreshStats, refreshWorkload, refreshRequestCounts]);
+
   const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
 
   return (
@@ -174,10 +206,12 @@ export function AdminDataProvider({ children }) {
       refreshStats,
       refreshWorkload,
       createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
-      savePurchase, createFollowUpPO, getPOTracker,
+      savePurchase, createFollowUpPO, createPOFromApprovedRequest, getPOTracker,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
       deleteRequest: handleDeleteRequest,
+      approveRemaining,
+      rejectRemaining,
       addWarehouse: handleAddWarehouse,
       deleteWarehouse: handleDeleteWarehouse,
     }}>

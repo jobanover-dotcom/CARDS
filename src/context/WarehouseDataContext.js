@@ -1,7 +1,12 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, updatePOMonitoring as updatePOMonitoringServer, updatePO as updatePOServer } from '../../actions/pos';
-import { recordReceiving as recordReceivingServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer } from '../../actions/procurement';
+import {
+  recordReceiving as recordReceivingServer,
+  editLatestReceiving as editLatestReceivingServer,
+  getPOTracker as getPOTrackerServer,
+  getPOWorkload as getPOWorkloadServer,
+} from '../../actions/procurement';
 import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
@@ -73,6 +78,16 @@ export function WarehouseDataProvider({ children }) {
     return result;
   }, [refreshStats, refreshWorkload]);
 
+  // Correcting a past receiving event moves a real quantity, so it refreshes the
+  // same counters as recording a new arrival — and it can also reopen a completed
+  // purchase order, which is why it is not a quiet write.
+  const editLatestReceiving = useCallback(async (input) => {
+    const result = await editLatestReceivingServer(input);
+    setPoVersion((v) => v + 1);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
+
   const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
 
   return <WarehouseDataContext.Provider value={{
@@ -82,7 +97,7 @@ export function WarehouseDataProvider({ children }) {
     receivingDueCount: workload.receivingDuePOs ?? 0,
     inProgressCount: workload.inProgressCount ?? 0,
     completedWorkloadCount: workload.completedCount ?? 0,
-    refreshStats, refreshWorkload, updatePO, updatePOMonitoring, createRequest, recordReceiving, getPOTracker,
+    refreshStats, refreshWorkload, updatePO, updatePOMonitoring, createRequest, recordReceiving, editLatestReceiving, getPOTracker,
   }}>{children}</WarehouseDataContext.Provider>;
 }
 

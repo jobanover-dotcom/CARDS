@@ -8,10 +8,13 @@ import {
   DELIVERY_STATUS,
   IN_PROGRESS_LIFECYCLE_STATUSES,
   PO_STATUS,
+  poLifecycle,
   poStatusLabel,
 } from '@/src/lib/deliveryStatus';
 import { isV1WorkflowPO } from '@/src/lib/poMigration';
 import { mrsItemAllowanceOf, readMRSAggregates } from '@/src/lib/mrsRequirement';
+import { deriveRequestApprovalStatus } from '@/src/lib/requestApproval';
+import { createPOFromApprovedRequestSchema } from '@/src/lib/validations/request';
 
 export interface POQuery { offset?: number; limit?: number; status?: string; statusIn?: string[]; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; hasReceivingDiscrepancy?: boolean; }
 
@@ -140,8 +143,200 @@ export async function createPOWithApproval(data: CreatePOData, source: { reqNumb
     await assertWithinMRSAllowance(tx, data.mrsNo, data.items);
     const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults(data), sourceReqNumber: source.reqNumber, items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } });
     await ensureMonitoringRows(tx, po.poNumber, po.items);
-    let allFull = true; for (const item of req.items) { const raw = approvalMap.has(item.id) ? approvalMap.get(item.id)! : (item.approvedQty ?? item.qty); if (!Number.isInteger(raw) || raw < 0) throw new Error(`Approved quantity for "${item.itemDescription}" must be a whole number of 0 or more`); const approvedQty = Math.min(raw, item.qty); if (approvedQty < item.qty) allFull = false; await tx.warehouseRequestItem.update({ where: { id: item.id }, data: { approvedQty } }); }
-    await tx.warehouseRequest.update({ where: { reqNumber: source.reqNumber }, data: { status: allFull ? 'Approved' : 'Partially Approved' } }); return po;
+    // Serialize approval writes on this request, so a concurrent Follow-up
+    // Approval in the Request section cannot settle against the same stale
+    // balance. Same lock the request actions take.
+    await tx.$queryRaw`SELECT "reqNumber" FROM "WarehouseRequest" WHERE "reqNumber" = ${source.reqNumber} FOR UPDATE`;
+    for (const item of req.items) {
+      const raw = approvalMap.has(item.id) ? approvalMap.get(item.id)! : (item.approvedQty ?? item.qty);
+      if (!Number.isInteger(raw) || raw < 0) throw new Error(`Approved quantity for "${item.itemDescription}" must be a whole number of 0 or more`);
+      const approvedQty = Math.min(raw, item.qty);
+      // Rejected quantity survives a PO being raised: a rejected line may still have
+      // approved units to buy, and those units must not become rejected. Only a
+      // LARGER approval absorbs the rejection, since both cannot hold the same unit.
+      const rejectedQty = Math.min(item.rejectedQty ?? 0, Math.max(0, item.qty - approvedQty));
+      await tx.warehouseRequestItem.update({ where: { id: item.id }, data: { approvedQty, rejectedQty } });
+    }
+    // Derived from the lines this transaction actually wrote, so a request with
+    // rejected quantity cannot be flipped back to "Partially Approved" here.
+    const settled = await tx.warehouseRequestItem.findMany({ where: { reqNumber: source.reqNumber } });
+    await tx.warehouseRequest.update({ where: { reqNumber: source.reqNumber }, data: { status: deriveRequestApprovalStatus(settled, req.status) } }); return po;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Create a PO from a Follow-up Approval decision.
+//
+// Follow-up Approval settles `requested - approved - rejected` in the REQUEST
+// section. This action is the second half of it: it raises a NEW purchase order
+// for the quantity that approval just released, and hands it to the ordinary
+// purchasing workflow.
+//
+// It is deliberately NOT createPOWithApproval. That action WRITES the approval —
+// it is how a purchaser approves while raising a PO. Here the approval is already
+// recorded, so writing it again would be at best redundant and at worst
+// destructive: the form seeds quantities from the approval DELTA, and a second
+// write would replace the approved total with that delta. Same reasoning as
+// createFollowUpPO: "raising a follow-up adds no approval".
+//
+// It is also NOT createFollowUpPO. That one settles `approved - purchased` for
+// the purchaser; this settles the approval the request section just resolved.
+// Raising the pre-existing approved-but-unpurchased balance here would mix the two
+// balances — that work belongs to Follow-up Purchase.
+//
+// The new PO stays on the parent MRS and keeps the source request link, so it
+// groups under its parent in the MRS view exactly as a Follow-up Purchase does.
+// ---------------------------------------------------------------------------
+
+export async function createPOFromApprovedRequest(input: unknown) {
+  const user = await assertCanManagePOs();
+  // Validated at the boundary, like every other purchase mutation here.
+  const data = createPOFromApprovedRequestSchema.parse(input);
+  const poNumber = data.poNumber.trim();
+
+  return runTx(async (tx) => {
+    const req = await tx.warehouseRequest.findUnique({
+      where: { reqNumber: data.reqNumber },
+      include: { items: true },
+    });
+    if (!req) throw new Error(`Source request ${data.reqNumber} not found`);
+
+    // Serialize on the MRS AND the request, then re-read. Every figure below is
+    // computed from state read inside this transaction, never from what the
+    // browser displayed.
+    await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "mrsNo" = ${req.mrsNo} FOR UPDATE`;
+    await tx.$queryRaw`SELECT "reqNumber" FROM "WarehouseRequest" WHERE "reqNumber" = ${data.reqNumber} FOR UPDATE`;
+
+    const clash = await tx.purchaseOrder.findUnique({ where: { poNumber }, select: { poNumber: true } });
+    if (clash) throw new Error(`Purchase order ${poNumber} already exists`);
+
+    // How much APPROVAL this request has granted, per line, and how much of it
+    // already has a purchase order.
+    //
+    // The cap is deliberately the unconsumed approval, NOT `approved - raised`.
+    // Those differ: an earlier partial approval of 60 with a PO for 50 leaves 10
+    // approved-but-never-raised units, and letting this PO absorb them would mix
+    // the two balances — the request section settling procurement work that
+    // belongs to Follow-up Purchase.
+    //
+    // The source of truth for "how much was approved" is RequestApprovalLog, not
+    // approvedQty: approvedQty cannot tell a PO-raised approval from an
+    // un-raised one. The matching half is the set of POs this action itself
+    // created, identified by their own audit entry.
+    const grantedByItem = new Map<string, number>();
+    for (const entry of await tx.requestApprovalLog.findMany({
+      where: { reqNumber: data.reqNumber, action: 'additional_approved' },
+    })) {
+      if (!entry.reqItemId) continue;
+      grantedByItem.set(entry.reqItemId, (grantedByItem.get(entry.reqItemId) ?? 0) + entry.qty);
+    }
+
+    const raisedByApprovalPo = new Map<string, number>();
+    const approvalPOs = await tx.deliveryAuditLog.findMany({
+      where: { action: 'follow_up_approval_po_raised' },
+      select: { poNumber: true },
+    });
+    for (const { poNumber } of approvalPOs) {
+      const po = await tx.purchaseOrder.findUnique({
+        where: { poNumber },
+        include: { items: true },
+      });
+      // A cancelled PO is no longer a claim on the approval, so it frees the
+      // quantity to be raised again.
+      if (!po || poLifecycle(po.status) === PO_STATUS.CANCELLED.value) continue;
+      if (po.sourceReqNumber !== data.reqNumber) continue;
+      for (const item of po.items) {
+        const key = item.itemDescription.trim().toLowerCase();
+        raisedByApprovalPo.set(key, (raisedByApprovalPo.get(key) ?? 0) + item.qty);
+      }
+    }
+
+    const aggregate = (await readMRSAggregates(tx, [req.mrsNo])).get(req.mrsNo);
+    const allowance = mrsItemAllowanceOf(aggregate);
+
+    const lines: { itemDescription: string; unit: string; qty: number }[] = [];
+    for (const entry of data.items) {
+      if (!Number.isInteger(entry.qty) || entry.qty < 1) {
+        throw new Error(`Quantity for "${entry.id}" must be a positive whole number`);
+      }
+      // Keyed by request ITEM ID, not description. A description can appear twice
+      // on a request; an id cannot be ambiguous.
+      const source = req.items.find((i) => i.id === entry.id);
+      if (!source) throw new Error(`Item ${entry.id} is not part of request ${data.reqNumber}`);
+
+      const approved = source.approvedQty ?? 0;
+      if (entry.qty > approved) {
+        throw new Error(
+          `Quantity for "${source.itemDescription}" cannot exceed the approved ${approved} ${source.unit} on request ${data.reqNumber}`,
+        );
+      }
+
+      const key = source.itemDescription.trim().toLowerCase();
+      const granted = grantedByItem.get(source.id) ?? 0;
+      const alreadyRaised = raisedByApprovalPo.get(key) ?? 0;
+      const unconsumed = Math.max(0, granted - alreadyRaised);
+      const purchasable = allowance.get(key)?.remaining ?? 0;
+      // Two independent ceilings. The approval one keeps this action from buying
+      // work it was not granted; the procurement one keeps it from claiming the
+      // same units twice. Neither is implied by the other: granted-but-already-
+      // bought is 0 unconsumed yet still has procurement room.
+      const cap = Math.min(unconsumed, purchasable);
+      if (entry.qty > cap) {
+        throw new Error(
+          unconsumed <= 0
+            ? `The approval for "${source.itemDescription}" already has a purchase order covering it. Nothing further can be raised for it from request ${data.reqNumber}.`
+            : `Quantity for "${source.itemDescription}" cannot exceed the ${cap} ${source.unit || 'unit(s)'} approved and not yet raised on ${req.mrsNo} — ${unconsumed} still unraised and ${purchasable} still unpurchased.`,
+        );
+      }
+
+      raisedByApprovalPo.set(key, alreadyRaised + entry.qty);
+      lines.push({ itemDescription: source.itemDescription, unit: source.unit, qty: entry.qty });
+    }
+
+    // The requirement, not the caller, decides the MRS and the warehouse. The
+    // approval belongs to this request, so the PO it buys must sit on this MRS.
+    const po = await tx.purchaseOrder.create({
+      data: {
+        ...withPoDefaults({
+          date: data.date,
+          poNumber,
+          items: lines,
+          requisitioner: req.requisitioner,
+          mrsNo: req.mrsNo,
+          poExpDate: data.poExpDate,
+          poRvdDate: data.poRvdDate,
+          pickupBy: data.pickupBy,
+          plateNumber: data.plateNumber,
+          approvedBy: req.requestedBy || data.approvedBy,
+          listedBy: data.listedBy,
+          notes: data.notes,
+          // The request owns the warehouse; the caller cannot redirect an
+          // approval to a different one.
+          warehouse: req.warehouse ?? '',
+          profileId: data.profileId,
+        }),
+        sourceReqNumber: data.reqNumber,
+        items: { create: lines.map((l) => ({ itemDescription: l.itemDescription, qty: l.qty, unit: l.unit })) },
+      },
+      include: { items: true },
+    });
+    await ensureMonitoringRows(tx, po.poNumber, po.items);
+
+    // Same log createFollowUpPO uses, so the new PO carries its own history entry
+    // and the approval it fulfils is traceable from the PO as well as the request.
+    await tx.deliveryAuditLog.create({
+      data: {
+        deliveryId: null,
+        poNumber,
+        action: 'follow_up_approval_po_raised',
+        detail: `Raised for ${req.mrsNo} from approval on ${data.reqNumber}: ${lines
+          .map((l) => `${l.itemDescription} ${l.qty} ${l.unit}`)
+          .join('; ')}`,
+        actor: user.username,
+      },
+    });
+
+    return po;
   });
 }
 

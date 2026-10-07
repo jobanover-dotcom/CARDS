@@ -203,4 +203,28 @@ describe('warehouse request rows show requirement progress', () => {
     // still filable. Purchasing progress did not change this rule.
     expect(screen.getByRole('button', { name: 'File Follow-Up' })).toBeTruthy();
   });
+
+  it('withdraws File Follow-Up once the remainder has been rejected', async () => {
+    // 50 requested, 30 approved, 20 rejected. Rejection is final: the warehouse
+    // cannot re-file for the 20 the purchaser refused, so the balance is zero.
+    getRequests.mockResolvedValue({
+      rows: [
+        request({
+          reqNumber: 'REQ-003',
+          mrsNo: 'MRS-003',
+          status: 'Approval Closed',
+          items: [
+            { id: 'ri-3', itemDescription: 'Steel', unit: 'pcs', qty: 50, approvedQty: 30, rejectedQty: 20 },
+          ],
+        }),
+      ],
+      total: 1,
+    });
+    getMRSProgress.mockResolvedValue({ byMrsNo: {} });
+    await renderView();
+
+    expect(screen.queryByRole('button', { name: 'File Follow-Up' })).toBeNull();
+    // The rejected figure is what the balance cell now explains.
+    expect(screen.getByText('20 rejected')).toBeTruthy();
+  });
 });

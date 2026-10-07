@@ -24,7 +24,16 @@ import {
 // the same 100 becomes 200 — a requirement that suddenly doubled because it was
 // bought from in two parts.
 
-const cement = (approvedQty: number) => ({ itemDescription: 'Cement', unit: 'bags', approvedQty });
+// A requirement line. `requestedQty` defaults to `approvedQty` so the bulk of
+// these tests — which are about what accumulates across POs — stay unchanged;
+// the requested/rejected cases pass them explicitly.
+const cement = (approvedQty: number, over: { requestedQty?: number; rejectedQty?: number } = {}) => ({
+  itemDescription: 'Cement',
+  unit: 'bags',
+  requestedQty: over.requestedQty ?? approvedQty,
+  approvedQty,
+  rejectedQty: over.rejectedQty ?? 0,
+});
 
 function po(
   poNumber: string,
@@ -352,5 +361,83 @@ describe('the aggregate uses the same helpers a single PO uses', () => {
     });
     expect(mrs.bucket).toBe('in_progress');
     expect(mrs.progressStage).toBe('awaiting_receiving');
+  });
+});
+// The MRS view's item breakdown reads these fields, and the aggregate used to
+// collapse requested into approved. That made the figure unreadable rather than
+// merely unused — anyone displaying `line.requestedQty` would have shown the
+// approved number under a Requested heading.
+describe('requested and rejected survive aggregation', () => {
+  it('reports requested and approved as different numbers', () => {
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      // Requested 100, approved 60.
+      requirementLines: [cement(60, { requestedQty: 100 })],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 60, purchasedQty: 60, receivedQty: 60 }] })],
+    });
+
+    expect(mrs.lines[0].requestedQty).toBe(100);
+    expect(mrs.lines[0].approvedQty).toBe(60);
+    expect(mrs.totals.requested).toBe(100);
+    expect(mrs.totals.approved).toBe(60);
+  });
+
+  it('carries rejected quantity through', () => {
+    // 100 requested, 60 approved, 40 refused outright.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(60, { requestedQty: 100, rejectedQty: 40 })],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 60, purchasedQty: 60, receivedQty: 60 }] })],
+    });
+
+    expect(mrs.lines[0].rejectedQty).toBe(40);
+    expect(mrs.totals.rejected).toBe(40);
+  });
+
+  it('keeps rejected units out of the procurement allowance', () => {
+    // The rejected 40 were never approved, so they must not become purchasable
+    // through any balance on this MRS.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(60, { requestedQty: 100, rejectedQty: 40 })],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 60, purchasedQty: 50, receivedQty: 50 }] })],
+    });
+
+    // 60 approved - 50 purchased. Not 100 - 50, and not 60 - 40.
+    expect(mrs.totals.procurementOutstanding).toBe(10);
+    expect(mrs.lines[0].procurementOutstanding).toBe(10);
+  });
+
+  it('counts requested and rejected ONCE across several POs', () => {
+    // The same rule the approved figure already obeys: a requirement of 100 does
+    // not become 200 because it was bought from in two parts.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(60, { requestedQty: 100, rejectedQty: 40 })],
+      purchaseOrders: [
+        po('PO-001', { items: [{ itemDescription: 'Cement', qty: 30, purchasedQty: 30, receivedQty: 30 }] }),
+        po('PO-002', { items: [{ itemDescription: 'Cement', qty: 30, purchasedQty: 20, receivedQty: 20 }] }) as any,
+      ],
+    });
+
+    expect(mrs.totals.requested).toBe(100);
+    expect(mrs.totals.rejected).toBe(40);
+    expect(mrs.totals.approved).toBe(60);
+    // Purchased DOES accumulate — it is the per-transaction figure.
+    expect(mrs.totals.purchased).toBe(50);
+  });
+
+  it('falls back to the PO snapshot when no request is behind the MRS', () => {
+    // A legacy manual PO has no request, so requested and approved read the same.
+    // That is honest — there is no separate asking — rather than a gap.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 25, purchasedQty: 0, receivedQty: 0 }] })],
+    });
+
+    expect(mrs.lines[0].requestedQty).toBe(25);
+    expect(mrs.lines[0].approvedQty).toBe(25);
+    expect(mrs.lines[0].rejectedQty).toBe(0);
   });
 });

@@ -5,6 +5,7 @@ import SearchInput from '../ui/SearchInput';
 import StatusBadge from '../ui/StatusBadge';
 import EmptyState from '../ui/EmptyState';
 import RequestDetailsModal from './RequestDetailsModal';
+import FollowUpApprovalModal from './FollowUpApprovalModal';
 import TableSkeleton from '../ui/TableSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import {
@@ -27,10 +28,40 @@ import {
 import { useAdminData } from '../../context/AdminDataContext';
 import { useAuth } from '../../context/AuthContext';
 import { getRequests } from '../../../actions/requests';
+import { requestApprovalOutstanding, REQUEST_STATUS } from '../../lib/requestApproval';
 import { useInfiniteRows } from '../../hooks/useInfiniteRows';
 
 const COLUMNS = ['R date', 'MRS #', 'Items', 'Qty', 'Approved by', 'Requisitioner', 'Approved / Balance', 'Status', 'Action'];
 const COL_SPAN = COLUMNS.length;
+
+// The filter cards, the heading block and the counts all read the same keys, so
+// adding a status is one entry here rather than four parallel edits.
+const STATUS_CARDS = [
+  { key: 'total', label: 'Total Requests', countKey: 'total', color: 'blue' },
+  { key: REQUEST_STATUS.PENDING.value, label: 'Pending', countKey: 'pending', color: 'yellow' },
+  { key: REQUEST_STATUS.REJECTED.value, label: 'Rejected', countKey: 'rejected', color: 'red' },
+  { key: REQUEST_STATUS.PARTIALLY_APPROVED.value, label: 'Partially Approved', countKey: 'partiallyApproved', color: 'green' },
+  // Sits outside the "Partially Approved" filter on purpose: that one means "still
+  // owes an approval", and a closed request owes none.
+  { key: REQUEST_STATUS.APPROVAL_CLOSED.value, label: 'Approval Closed', countKey: 'approvalClosed', color: 'blue' },
+];
+
+// A lookup rather than the nested ternaries this used to be: the fifth status
+// pushed them past what could be read at a glance, and the status strings are now
+// owned by REQUEST_STATUS so the filter, the badge and the counts cannot drift.
+const FILTER_HEADINGS = {
+  total: { title: 'Total Requests', hint: 'All warehouse requests' },
+  [REQUEST_STATUS.PENDING.value]: { title: 'Pending Requests', hint: 'Warehouse requests awaiting approval' },
+  [REQUEST_STATUS.REJECTED.value]: { title: 'Rejected Requests', hint: 'Rejected warehouse requests' },
+  [REQUEST_STATUS.PARTIALLY_APPROVED.value]: {
+    title: 'Partially Approved Requests',
+    hint: 'Requests with an outstanding balance for follow-up approval',
+  },
+  [REQUEST_STATUS.APPROVAL_CLOSED.value]: {
+    title: 'Approval Closed Requests',
+    hint: 'Some quantity approved, the remainder explicitly rejected — no approval outstanding',
+  },
+};
 
 function RequestsView() {
   const { requestCounts, requestVersion, deleteRequest } = useAdminData();
@@ -44,6 +75,7 @@ function RequestsView() {
   const [selectedRequestStatus, setSelectedRequestStatus] = useState('total');
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [showRequestDetailsModal, setShowRequestDetailsModal] = useState(false);
+  const [followUpReqNumber, setFollowUpReqNumber] = useState(null);
   const [showRemarksModal, setShowRemarksModal] = useState(false);
   const [remarksToDisplay, setRemarksToDisplay] = useState('');
   const [deletingReqNumber, setDeletingReqNumber] = useState(null);
@@ -100,9 +132,19 @@ function RequestsView() {
     }
   };
 
+  // What a row can be opened for.
+  const itemsOf = (req) => req.items || [];
   const rowAction = (req) => {
     if (req.status === 'Rejected') return { label: 'Remarks', run: handleViewRejectedRemarks, className: actionSecondary };
     if (req.status === 'Pending') return { label: 'Review', run: handleOpenRequestDetails, className: actionPrimary };
+    // Follow-up Approval is gated on the OUTSTANDING BALANCE, never on the
+    // status string. Once every line is approved or rejected the balance is zero
+    // and the button is gone — including for a request a human later relabelled
+    // "Partially Approved" by hand, which is the case a status check would get
+    // wrong and re-open a decision that has already been closed.
+    if (requestApprovalOutstanding(itemsOf(req)) > 0) {
+      return { label: 'Follow-up Approval', run: () => setFollowUpReqNumber(req.reqNumber), className: actionPrimary };
+    }
     return null;
   };
 
@@ -116,44 +158,22 @@ function RequestsView() {
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] max-md:grid-cols-2 gap-5 mb-8">
-        <StatCard
-          label="Total Requests"
-          count={totalRequestsCount.toLocaleString()}
-          color="blue"
-          isActive={selectedRequestStatus === 'total'}
-          onClick={() => setSelectedRequestStatus('total')}
-        />
-        <StatCard
-          label="Pending"
-          count={requestCounts.pending.toLocaleString()}
-          color="yellow"
-          isActive={selectedRequestStatus === 'Pending'}
-          onClick={() => setSelectedRequestStatus(selectedRequestStatus === 'Pending' ? 'total' : 'Pending')}
-        />
-        <StatCard
-          label="Rejected"
-          count={requestCounts.rejected.toLocaleString()}
-          color="red"
-          isActive={selectedRequestStatus === 'Rejected'}
-          onClick={() => setSelectedRequestStatus(selectedRequestStatus === 'Rejected' ? 'total' : 'Rejected')}
-        />
-        <StatCard
-          label="Partially Approved"
-          count={requestCounts.partiallyApproved.toLocaleString()}
-          color="green"
-          isActive={selectedRequestStatus === 'Partially Approved'}
-          onClick={() => setSelectedRequestStatus(selectedRequestStatus === 'Partially Approved' ? 'total' : 'Partially Approved')}
-        />
+        {STATUS_CARDS.map((card) => (
+          <StatCard
+            key={card.key}
+            label={card.label}
+            count={(card.key === 'total' ? totalRequestsCount : requestCounts[card.countKey]).toLocaleString()}
+            color={card.color}
+            isActive={selectedRequestStatus === card.key}
+            onClick={() => setSelectedRequestStatus(selectedRequestStatus === card.key ? 'total' : card.key)}
+          />
+        ))}
       </div>
 
       <div className="mt-8">
         <div className="mb-4">
-          <h2 className="m-0 text-lg text-[#333] font-bold">
-            {selectedRequestStatus === 'Pending' ? 'Pending Requests' : selectedRequestStatus === 'Rejected' ? 'Rejected Requests' : selectedRequestStatus === 'Partially Approved' ? 'Partially Approved Requests' : 'Total Requests'}
-          </h2>
-          <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">
-            {selectedRequestStatus === 'Pending' ? 'Warehouse requests awaiting approval' : selectedRequestStatus === 'Rejected' ? 'Rejected warehouse requests' : selectedRequestStatus === 'Partially Approved' ? 'Requests with an outstanding balance for follow-up' : 'All warehouse requests'}
-          </p>
+          <h2 className="m-0 text-lg text-[#333] font-bold">{FILTER_HEADINGS[selectedRequestStatus]?.title}</h2>
+          <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">{FILTER_HEADINGS[selectedRequestStatus]?.hint}</p>
         </div>
         <SearchInput
           placeholder="Search MRS #, request or item..."
@@ -177,11 +197,15 @@ function RequestsView() {
                   {filteredRequests.length > 0 ? (
                     <>
                       {filteredRequests.map((req, index) => {
-                        const items = req.items || [];
+                        const items = itemsOf(req);
                         const totalQty = items.reduce((s, it) => s + it.qty, 0);
                         const hasApprovals = items.some((it) => it.approvedQty != null);
                         const totalApproved = hasApprovals ? items.reduce((s, it) => s + (it.approvedQty ?? 0), 0) : null;
-                        const balance = totalApproved != null ? Math.max(0, totalQty - totalApproved) : null;
+                        const totalRejected = items.reduce((s, it) => s + (it.rejectedQty ?? 0), 0);
+                        // Balance is requested minus BOTH decided quantities. Counting
+                        // only the approved side would keep rejected units reading as
+                        // outstanding and re-offer a decision that is already closed.
+                        const balance = totalApproved != null ? requestApprovalOutstanding(items) : null;
                         const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '\u2014';
                         const action = rowAction(req);
                         return (
@@ -209,7 +233,9 @@ function RequestsView() {
                             <td className={tdStrong}>{req.requestedBy}</td>
                             <td className={tdEl}>{req.requisitioner}</td>
                             <td className={`p-4 font-medium whitespace-nowrap text-right tabular-nums ${balance > 0 ? 'text-[#ef6c00] font-bold' : 'text-[#333]'}`}>
-                              {totalApproved == null ? '\u2014' : `${totalApproved} / ${totalQty}${balance > 0 ? ` · bal ${balance}` : ''}`}
+                              {totalApproved == null
+                                ? '\u2014'
+                                : `${totalApproved} / ${totalQty}${totalRejected > 0 ? ` · rej ${totalRejected}` : ''}${balance > 0 ? ` · bal ${balance}` : ''}`}
                             </td>
                             <td className="p-4 whitespace-nowrap"><StatusBadge status={req.status} /></td>
                             <td className="p-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
@@ -267,6 +293,13 @@ function RequestsView() {
         <RequestDetailsModal
           request={selectedRequest}
           onClose={() => { setShowRequestDetailsModal(false); setSelectedRequest(null); }}
+        />
+      )}
+
+      {followUpReqNumber && (
+        <FollowUpApprovalModal
+          reqNumber={followUpReqNumber}
+          onClose={() => setFollowUpReqNumber(null)}
         />
       )}
 

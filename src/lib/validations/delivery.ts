@@ -103,3 +103,33 @@ export const recordReceivingSchema = z.object({
 })
 
 export type RecordReceivingInput = z.infer<typeof recordReceivingSchema>
+
+// ---------------------------------------------------------------------------
+// Edit a receiving event (Warehouse).
+//
+// Corrects a miscount in the LATEST receiving event on a purchase order. The new
+// figure is the CUMULATIVE total for the line, not an increment, so it replaces
+// the event's `toQty` rather than adding to it.
+//
+// Whether the event being edited is the latest one is deliberately NOT checked
+// here: that depends on which event exists, not on what the client sent, so the
+// action decides it inside its own transaction. A client that could assert it
+// would be asserting something the server must establish for itself.
+//
+// `toQty` cannot exceed purchasedQty and cannot fall below the event's own
+// `fromQty` — both are quantities the client has no way of knowing, so they are
+// checked server-side against stored rows rather than declared here.
+// ---------------------------------------------------------------------------
+export const editReceivingSchema = z.object({
+  poNumber: z.string().min(1, 'PO number is required'),
+  items: z
+    .array(
+      z.object({
+        poItemId: z.string().min(1),
+        toQty: z.number().int().min(0, 'Received quantity must be 0 or more'),
+      }),
+    )
+    .min(1, 'At least one item is required'),
+})
+
+export type EditReceivingInput = z.infer<typeof editReceivingSchema>

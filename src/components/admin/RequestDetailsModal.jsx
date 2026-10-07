@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAdminData } from '../../context/AdminDataContext';
 import { getPOByNumber } from '../../../actions/pos';
+import { approvalOutstandingQty } from '../../lib/deliveryQuantities';
 
 function RequestDetailsModal({ request, onClose }) {
   const router = useRouter();
@@ -14,7 +15,10 @@ function RequestDetailsModal({ request, onClose }) {
   const [poMissing, setPoMissing] = useState(false);
   const reqItems = request.items || [];
   const [approvedQtys, setApprovedQtys] = useState(
-    () => Object.fromEntries(reqItems.map((it) => [it.id, String(it.qty)]))
+    // Seeded with what is ALREADY approved, not the full requested quantity, so
+    // re-opening a Partially Approved request shows the current decision instead
+    // of implying a fresh full approval that has to be retyped.
+    () => Object.fromEntries(reqItems.map((it) => [it.id, String(it.approvedQty ?? it.qty)]))
   );
 
   const parsedApproved = (item) => {
@@ -143,7 +147,10 @@ function RequestDetailsModal({ request, onClose }) {
             <label className="text-[11px] font-bold text-[#666]">ITEMS</label>
             {reqItems.map((it) => {
               const approved = parsedApproved(it);
-              const balance = Math.max(0, it.qty - approved);
+              // Subtracting rejected quantity keeps this consistent with the
+              // server: a line whose remainder was already refused has nothing
+              // left to approve, whatever this form's input is set to.
+              const balance = approvalOutstandingQty(it.qty, approved, it.rejectedQty ?? 0);
               return (
                 <div key={it.id} className="grid grid-cols-3 gap-3 items-end border border-[#eee] rounded-md p-3 text-left">
                   <div className="col-span-3 md:col-span-1 flex flex-col gap-1">

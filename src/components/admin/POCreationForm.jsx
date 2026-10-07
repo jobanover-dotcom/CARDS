@@ -21,29 +21,47 @@ function makeEmptyItem() { return { itemDescription: '', qty: '', unit: 'pcs', m
 // original PO is never opened, re-supplied or amended.
 function POCreationForm({ onClose, onSuccess, initialData = null }) {
   const { user } = useAuth();
-  const { createPO, createFollowUpPO, warehouses } = useAdminData();
+  const { createPO, createFollowUpPO, createPOFromApprovedRequest, warehouses } = useAdminData();
   const followUp = initialData?.followUp ?? null;
   const fromRequest = !!(initialData?.sourceReqNumber && initialData?.sourceRequestWarehouse);
+  // A PO raised from a Follow-up Approval decision: the approval is already
+  // recorded, so this mode submits ids+qty and NEVER builds itemApprovals.
+  //
+  // That omission is the whole reason this mode exists. In `fromRequest` mode the
+  // approval is derived from the form's quantity, so seeding this form with an
+  // approval DELTA would rewrite approvedQty from e.g. 80 down to 20 and destroy
+  // the approval that was just granted.
+  const approvalPO = initialData?.approvalPO ?? null;
   const [formListedBy, setFormListedBy] = useState(user?.name || user?.username || '');
   const [formPoNumber, setFormPoNumber] = useState('');
-  const [formPoDate, setFormPoDate] = useState(followUp?.date || '');
+  const [formPoDate, setFormPoDate] = useState(followUp?.date || new Date().toISOString().slice(0, 10));
   // Follow-up lines arrive pre-seeded and capped from the server's MRS remainder.
-  const [items, setItems] = useState(
-    initialData?.items?.length
+  // Seed lines. The approval handoff arrives as {id, qty, itemDescription, unit}
+// per request item; the delta is the quantity, and it is also the cap, because the
+// server will not let a PO claim an approval that has not been granted.
+  const seedItems = approvalPO?.items?.length
+    ? approvalPO.items.map((it) => ({
+        id: it.id,
+        itemDescription: it.itemDescription || '',
+        unit: it.unit || 'pcs',
+        qty: String(it.qty),
+        maxQty: Number(it.qty),
+      }))
+    : initialData?.items?.length
       ? initialData.items.map((it) => ({ ...it, qty: String(it.qty), maxQty: Number(it.maxQty ?? it.qty) }))
-      : [makeEmptyItem()],
-  );
+      : [makeEmptyItem()];
+  const [items, setItems] = useState(seedItems);
   const [formNotes, setFormNotes] = useState('');
-  const [formApprovedBy, setFormApprovedBy] = useState(initialData?.approvedBy || '');
-  const [formApprovalDate, setFormApprovalDate] = useState(initialData?.approvalDate || '');
-  const [formRequisitioner, setFormRequisitioner] = useState(initialData?.requisitioner || '');
-  const [formMrsNo, setFormMrsNo] = useState(initialData?.mrsNo || '');
-  const [formWarehouse, setFormWarehouse] = useState(initialData?.sourceRequestWarehouse || user?.warehouse || (warehouses.length ? warehouses[0] : ''));
+  const [formApprovedBy, setFormApprovedBy] = useState(initialData?.approvedBy || approvalPO?.approvedBy || '');
+  const [formApprovalDate, setFormApprovalDate] = useState(initialData?.approvalDate || approvalPO?.approvalDate || '');
+  const [formRequisitioner, setFormRequisitioner] = useState(initialData?.requisitioner || approvalPO?.requisitioner || '');
+  const [formMrsNo, setFormMrsNo] = useState(initialData?.mrsNo || approvalPO?.mrsNo || '');
+  const [formWarehouse, setFormWarehouse] = useState(initialData?.sourceRequestWarehouse || approvalPO?.warehouse || user?.warehouse || (warehouses.length ? warehouses[0] : ''));
   // A follow-up RAISES a purchase order against the remainder of a material
   // request; it does not buy anything, so it asks for no supplier — exactly like
   // raising a PO by hand. The supplier is chosen later, in Save Purchase on the
   // new PO, which is what keeps one supplier per purchasing transaction.
-  const lockedLines = fromRequest || !!followUp;
+  const lockedLines = fromRequest || !!followUp || !!approvalPO;
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
 
@@ -67,13 +85,35 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
     for (const it of items) {
       const qty = Number(it.qty);
       if (it.maxQty != null && qty > it.maxQty) {
-        setSubmitError(`Quantity for "${it.itemDescription}" cannot exceed the approved amount of ${it.maxQty} ${it.unit}.`); return;
+        // The cap reads differently per mode because it comes from a different
+        // balance. An approval handoff is capped by the approval the purchaser
+        // just granted, not by what is left to buy.
+        setSubmitError(
+          approvalPO
+            ? `Quantity for "${it.itemDescription}" cannot exceed the ${it.maxQty} ${it.unit} that was approved. Reduce it, or approve more from the Request section.`
+            : `Quantity for "${it.itemDescription}" cannot exceed the approved amount of ${it.maxQty} ${it.unit}.`,
+        );
+        return;
       }
     }
     if (submitting) return;
     setSubmitting(true);
     try {
-      if (followUp) {
+      if (approvalPO) {
+        // Follow-up Approval's second half. Items go by REQUEST ITEM ID, and no
+        // approval is submitted: the decision is already recorded, and sending a
+        // quantity here as though it were an approval would overwrite the approved
+        // total with the delta. The server re-derives every quantity from the
+        // request and the MRS inside its transaction.
+        await createPOFromApprovedRequest({
+          reqNumber: approvalPO.reqNumber,
+          poNumber: formPoNumber.trim(),
+          date: formPoDate,
+          notes: formNotes.trim() || undefined,
+          profileId: user?.id || null,
+          items: items.map((it) => ({ id: it.id, qty: Number(it.qty) })),
+        });
+      } else if (followUp) {
         // A follow-up never touches the original PO. It raises a new PO on the
         // same MRS; the server re-validates every figure against current data.
         await createFollowUpPO({
@@ -116,11 +156,22 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
   return <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-[1000] animate-fade-in">
     <div className="bg-white rounded-xl w-full max-w-[580px] max-h-[90vh] overflow-y-auto shadow-[0_10px_30px_rgba(0,0,0,0.15)] animate-slide-in p-6">
       <div className="flex justify-between items-center border-b border-[#eee] pb-3 mb-5">
-        <h2 className="m-0 text-sm font-bold text-[#333] tracking-wide">{followUp ? 'FOLLOW-UP PURCHASE' : 'PURCHASE ORDER FORM'}</h2>
+        <h2 className="m-0 text-sm font-bold text-[#333] tracking-wide">
+          {approvalPO ? 'FOLLOW-UP APPROVAL — PURCHASE ORDER' : followUp ? 'FOLLOW-UP PURCHASE' : 'PURCHASE ORDER FORM'}
+        </h2>
         <button type="button" className="text-2xl cursor-pointer text-[#888] p-1 leading-none" onClick={onClose}>&times;</button>
       </div>
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         {submitError && <div className="px-4 py-2.5 rounded-lg text-sm font-medium bg-[#ffebee] text-[#c62828] border border-[#ef9a9a]">{submitError}</div>}
+        {approvalPO && (
+          <p className="m-0 text-[11px] text-[#888] bg-[#f7f9fa] border border-[#eef1f3] rounded-md p-2.5">
+            This raises a <strong>new purchase order</strong> on {formMrsNo} for the{' '}
+            {` ${approvalPO.items.reduce((s, i) => s + Number(i.qty || 0), 0)} `}unit(s) just approved on{' '}
+            {approvalPO.reqNumber}. It opens in Pending Purchase; record the supplier and the purchase
+            from it afterwards. Quantity already approved but not yet purchased stays with
+            <strong> Follow-up Purchase</strong> — approving and purchasing are separate decisions.
+          </p>
+        )}
         {followUp && !followUp.blocked && (
           <p className="m-0 text-[11px] text-[#888] bg-[#f7f9fa] border border-[#eef1f3] rounded-md p-2.5">
             This raises a <strong>new purchase order</strong> on {followUp.mrsNo} for the
@@ -138,17 +189,23 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
         <div className="flex flex-col gap-1.5 text-left"><label className={labelClass}>LISTED BY (PURCHASER) *</label><input type="text" value={formListedBy} onChange={(e) => setFormListedBy(e.target.value)} required className={inputClass} /></div>
         <div className="flex gap-4"><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>PO NUMBER *</label><input type="text" value={formPoNumber} onChange={(e) => setFormPoNumber(e.target.value)} required className={inputClass} /></div><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>DATE *</label><input type="date" value={formPoDate} onChange={(e) => setFormPoDate(e.target.value)} required className={inputClass} /></div></div>
         <div className="text-[11px] font-bold text-[#888] tracking-widest border-b border-[#f0f0f0] pb-1 flex justify-between"><span>ITEM DETAILS</span>{!lockedLines && <button type="button" onClick={addItem} className="text-[#0288d1] bg-none border-none">+ Add item</button>}</div>
-        {items.map((it, idx) => <div key={idx} className="flex gap-3 items-start border border-[#f0f0f0] rounded-md p-3"><div className="flex flex-col gap-1.5 flex-[2]"><label className={labelClass}>{idx === 0 ? 'ITEM DESCRIPTION *' : ''}</label><input type="text" value={it.itemDescription} onChange={(e) => updateItem(idx, 'itemDescription', e.target.value)} required readOnly={lockedLines} className={lockedLines ? lockedClass : inputClass} /></div><div className="flex flex-col gap-1.5 flex-[0.8]"><label className={labelClass}>{idx === 0 ? 'QTY *' : ''}</label><input type="number" min="1" max={it.maxQty ?? undefined} value={it.qty} onChange={(e) => updateItem(idx, 'qty', e.target.value)} required disabled={followUp?.blocked} className={inputClass} />{it.maxQty != null && <span className="text-[10px] text-[#777]">{followUp ? `max: ${it.maxQty} left to buy` : `max: ${it.maxQty} ${it.unit}`}</span>}</div><div className="flex flex-col gap-1.5 flex-[1]"><label className={labelClass}>{idx === 0 ? 'UNIT *' : ''}</label><select value={it.unit} onChange={(e) => updateItem(idx, 'unit', e.target.value)} disabled={lockedLines} required className={lockedLines ? lockedClass : inputClass}><option value="pcs">pcs</option><option value="bags">bags</option><option value="rolls">rolls</option><option value="sets">sets</option><option value="boxes">boxes</option></select></div>{!lockedLines && items.length > 1 && <button type="button" onClick={() => removeItem(idx)} className="text-[#d32f2f] text-lg mt-6">&times;</button>}</div>)}
+        {items.map((it, idx) => <div key={idx} className="flex gap-3 items-start border border-[#f0f0f0] rounded-md p-3"><div className="flex flex-col gap-1.5 flex-[2]"><label className={labelClass}>{idx === 0 ? 'ITEM DESCRIPTION *' : ''}</label><input type="text" value={it.itemDescription} onChange={(e) => updateItem(idx, 'itemDescription', e.target.value)} required readOnly={lockedLines} className={lockedLines ? lockedClass : inputClass} /></div><div className="flex flex-col gap-1.5 flex-[0.8]"><label className={labelClass}>{idx === 0 ? 'QTY *' : ''}</label><input type="number" min="1" max={it.maxQty ?? undefined} value={it.qty} onChange={(e) => updateItem(idx, 'qty', e.target.value)} required disabled={followUp?.blocked} className={inputClass} />{it.maxQty != null && <span className="text-[10px] text-[#777]">
+          {approvalPO ? `max: ${it.maxQty} approved` : followUp ? `max: ${it.maxQty} left to buy` : `max: ${it.maxQty} ${it.unit}`}
+        </span>}</div><div className="flex flex-col gap-1.5 flex-[1]"><label className={labelClass}>{idx === 0 ? 'UNIT *' : ''}</label><select value={it.unit} onChange={(e) => updateItem(idx, 'unit', e.target.value)} disabled={lockedLines} required className={lockedLines ? lockedClass : inputClass}><option value="pcs">pcs</option><option value="bags">bags</option><option value="rolls">rolls</option><option value="sets">sets</option><option value="boxes">boxes</option></select></div>{!lockedLines && items.length > 1 && <button type="button" onClick={() => removeItem(idx)} className="text-[#d32f2f] text-lg mt-6">&times;</button>}</div>)}
         <div className="flex flex-col gap-1.5"><label className={labelClass}>ITEM NOTES (optional)</label><input type="text" value={formNotes} onChange={(e) => setFormNotes(e.target.value)} className={inputClass} /></div>
         <div className="flex flex-col gap-1.5"><label className={labelClass}>{followUp ? 'WAREHOUSE' : fromRequest ? 'WAREHOUSE (REQUISITIONER)' : 'WAREHOUSE'} *</label>{lockedLines ? <input type="text" value={formWarehouse} readOnly className={lockedClass} /> : <select value={formWarehouse} onChange={(e) => setFormWarehouse(e.target.value)} required className={inputClass}><option value="" disabled>Select warehouse</option>{warehouses.map((w) => <option key={w} value={w}>{w}</option>)}</select>}</div>
         <div className="text-[11px] font-bold text-[#888] tracking-widest border-b border-[#f0f0f0] pb-1">APPROVAL</div>
         <div className="flex gap-4"><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>APPROVED BY (WAREHOUSE) *</label><input type="text" value={formApprovedBy} onChange={(e) => setFormApprovedBy(e.target.value)} required className={inputClass} /></div><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>DATE *</label><input type="date" value={formApprovalDate} onChange={(e) => setFormApprovalDate(e.target.value)} required className={inputClass} /></div></div>
-        <div className="flex gap-4"><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>REQUISITIONER *</label><input type="text" value={formRequisitioner} onChange={(e) => setFormRequisitioner(e.target.value)} required className={inputClass} /></div><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>MRS # *</label><input type="text" value={formMrsNo} onChange={(e) => setFormMrsNo(e.target.value)} required readOnly={!!followUp} className={followUp ? lockedClass : inputClass} />{followUp && <span className="text-[10px] text-[#888]">{lockNote}</span>}</div></div>
+        <div className="flex gap-4"><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>REQUISITIONER *</label><input type="text" value={formRequisitioner} onChange={(e) => setFormRequisitioner(e.target.value)} required className={inputClass} /></div><div className="flex flex-col gap-1.5 flex-1"><label className={labelClass}>MRS # *</label><input type="text" value={formMrsNo} onChange={(e) => setFormMrsNo(e.target.value)} required readOnly={!!followUp || !!approvalPO} className={followUp || approvalPO ? lockedClass : inputClass} />
+          {approvalPO
+            ? <span className="text-[10px] text-[#888]">Locked: this PO fulfils the approval already granted on {approvalPO.reqNumber}.</span>
+            : followUp && <span className="text-[10px] text-[#888]">{lockNote}</span>}
+        </div></div>
         {!followUp && <p className="m-0 text-[11px] text-[#888] bg-[#f7f9fa] border border-[#eef1f3] rounded-md p-2.5">
           The supplier is not set here. A purchase order records the approved requirement; the supplier is
           chosen when purchase quantities are saved, in the Save Purchase step.
         </p>}
-        <div className="flex justify-center gap-4 mt-6 pt-4 border-t border-[#eee]"><button type="button" onClick={onClose} className="py-2.5 px-6 rounded-md bg-white text-[#d32f2f] border border-[#d32f2f]">Cancel</button><button type="submit" disabled={submitting || followUp?.blocked} className="py-2.5 px-6 rounded-md bg-[#006680] text-white disabled:opacity-60">{submitting ? 'Saving…' : followUp ? 'Create Follow-up PO' : 'Save'}</button></div>
+        <div className="flex justify-center gap-4 mt-6 pt-4 border-t border-[#eee]"><button type="button" onClick={onClose} className="py-2.5 px-6 rounded-md bg-white text-[#d32f2f] border border-[#d32f2f]">Cancel</button><button type="submit" disabled={submitting || followUp?.blocked} className="py-2.5 px-6 rounded-md bg-[#006680] text-white disabled:opacity-60">{submitting ? 'Saving…' : approvalPO ? 'Create PO' : followUp ? 'Create Follow-up PO' : 'Save'}</button></div>
       </form>
     </div>
   </div>;

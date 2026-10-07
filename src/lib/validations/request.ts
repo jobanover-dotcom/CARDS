@@ -22,6 +22,107 @@ export const requestSchema = z.object({
 
 export type RequestInput = z.infer<typeof requestSchema>
 
+// ---------------------------------------------------------------------------
+// Follow-up Approval (Admin) — decides the quantity a PARTIALLY APPROVED request
+// has left undecided.
+//
+// This is the Request section's counterpart to Follow-up Purchase, and the two are
+// independent balances: this one settles `requested - approved - rejected`, while
+// Follow-up Purchase settles `approved - purchased` across the MRS's POs.
+//
+// `additionalApproval` is an INCREMENT, not a new total. The caller states how
+// many MORE units to approve of what is still outstanding, and the server adds it
+// to the approved quantity it reads inside the transaction. Submitting a total
+// where an increment is expected is the single most damaging mistake available
+// here, so the field is named for what it is and the wording says so.
+//
+// The per-item cap (additionalApproval <= outstanding) CANNOT be expressed in the
+// schema: outstanding depends on stored quantities, so it is re-read and enforced
+// inside the server transaction. What the schema owns is shape and sign.
+// ---------------------------------------------------------------------------
+export const followUpApprovalSchema = z.object({
+  reqNumber: z.string().min(1, 'Request number is required'),
+  items: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        additionalApproval: z
+          .number()
+          .int('Additional approval must be a whole number')
+          .min(0, 'Additional approval cannot be negative'),
+      }),
+    )
+    .min(1, 'At least one item is required'),
+})
+
+export type FollowUpApprovalInput = z.infer<typeof followUpApprovalSchema>
+
+// ---------------------------------------------------------------------------
+// Reject Remaining (Admin) — refuses the unapproved remainder outright.
+//
+// A rejection always applies to the WHOLE outstanding balance of each named line,
+// so it carries no quantity: there is exactly one quantity it can mean, and
+// accepting a number here would only invite a client to send the wrong one. The
+// quantity is read from the database inside the transaction and logged there.
+//
+// A reason is mandatory and is trimmed server-side as well as validated here —
+// "remaining quantity rejected" with no explanation is an untraceable outcome, and
+// traceable is the whole point of this action.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Create a PO from a Follow-up Approval decision (Admin).
+//
+// The second half of Follow-up Approval: raise a NEW purchase order for the
+// quantity the approval just released. Items are keyed by REQUEST ITEM ID rather
+// than description, because one description can appear twice on a request and an
+// id cannot be ambiguous.
+//
+// There is deliberately NO itemApprovals field. This action must never write an
+// approval — the approval is already recorded by approveRemaining, and a second
+// write would replace the approved TOTAL with the submitted delta. The absence of
+// the field is the guarantee.
+//
+// It is also not createFollowUpPOSchema: that settles `approved - purchased`, this
+// settles the approval. Mixing the two would let the request section claim
+// procurement work that belongs to the PO section.
+// ---------------------------------------------------------------------------
+export const createPOFromApprovedRequestSchema = z.object({
+  reqNumber: z.string().min(1, 'A source request is required'),
+  poNumber: z.string().min(1, 'PO number is required'),
+  date: z.string().min(1, 'PO date is required'),
+  items: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        qty: z.number().int().min(1, 'Quantity must be a positive whole number'),
+      }),
+    )
+    .min(1, 'At least one item is required'),
+  poExpDate: z.string().optional(),
+  poRvdDate: z.string().optional(),
+  pickupBy: z.string().optional(),
+  plateNumber: z.string().optional(),
+  approvedBy: z.string().optional(),
+  listedBy: z.string().optional(),
+  notes: z.string().max(2000).optional(),
+  profileId: z.string().optional(),
+})
+
+export type CreatePOFromApprovedRequestInput = z.infer<typeof createPOFromApprovedRequestSchema>
+
+export const rejectRemainingSchema = z.object({
+  reqNumber: z.string().min(1, 'Request number is required'),
+  reason: z
+    .string()
+    .transform((v) => v.trim())
+    .pipe(z.string().min(1, 'A reason is required when rejecting remaining quantity')),
+  items: z
+    .array(z.object({ id: z.string().min(1) }))
+    .min(1, 'At least one item is required'),
+})
+
+export type RejectRemainingInput = z.infer<typeof rejectRemainingSchema>
+
 // Purchase Order validation.
 //
 // NOTE: there is deliberately NO supplier field. The supplier belongs to the

@@ -48,6 +48,7 @@ interface WarehouseRequestItemRow {
   unit: string;
   qty: number;
   approvedQty: number | null;
+  rejectedQty: number | null;
 }
 
 export interface WarehouseRequestRow {
@@ -98,7 +99,11 @@ export type MRSAllocations = Map<string, Map<string, MRSItemAllocation[]>>;
  * follow-up may be offered without deriving anything itself.
  */
 export interface MRSRequirementTotals {
+  /** what the request asked for, counted once across the MRS */
+  requested: number;
   approved: number;
+  /** explicitly refused, counted once. Never purchasable. */
+  rejected: number;
   purchased: number;
   received: number;
   /** the ONLY follow-up allowance: approved - purchased, across all POs */
@@ -218,7 +223,11 @@ export function requirementLinesFromRequest(
   return (request?.items ?? []).map((i) => ({
     itemDescription: i.itemDescription,
     unit: i.unit,
+    // `qty` is what the warehouse asked for, which is NOT the approved figure:
+    // a line requested at 100 and approved at 60 has to be able to say so.
+    requestedQty: i.qty,
     approvedQty: i.approvedQty ?? i.qty,
+    rejectedQty: i.rejectedQty ?? 0,
   }));
 }
 

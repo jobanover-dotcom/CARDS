@@ -117,7 +117,9 @@ function poRow(over: Record<string, unknown> = {}) {
     // The MRS requirement totals the server attaches to every row. Defaults to
     // MRS-001 with 60 of 100 bought, so 40 remains follow-up-purchasable.
     mrsTotals: {
+      requested: 100,
       approved: 100,
+      rejected: 0,
       purchased: 60,
       received: 60,
       procurementOutstanding: 40,
@@ -136,7 +138,9 @@ function fullyPurchasedMRSRow(over: Record<string, unknown> = {}) {
   return poRow({
     ...over,
     mrsTotals: {
+      requested: 100,
       approved: 100,
+      rejected: 0,
       purchased: 100,
       received: 60,
       procurementOutstanding: 0,
@@ -249,7 +253,9 @@ function mrsGroup(over: Record<string, unknown> = {}) {
       {
         itemDescription: 'Cement',
         unit: 'bags',
+        requestedQty: 100,
         approvedQty: 100,
+        rejectedQty: 0,
         purchasedQty: 100,
         receivedQty: 80,
         procurementOutstanding: 0,
@@ -258,7 +264,9 @@ function mrsGroup(over: Record<string, unknown> = {}) {
       },
     ],
     totals: {
+      requested: 100,
       approved: 100,
+      rejected: 0,
       purchased: 100,
       received: 80,
       procurementOutstanding: 0,
@@ -1010,5 +1018,141 @@ describe('Supplier delivery receipts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Supplier Receipts (1)' }));
 
     await screen.findByText(/belongs to another warehouse/);
+  });
+});
+
+// The MRS row carries ONE general quantity for the whole requirement. These pin
+// the control that reveals the per-item breakdown behind it, and the two ways it
+// could be wrong: opening the wrong panel, or the click ALSO collapsing the
+// purchase orders underneath.
+describe('the MRS Track control', () => {
+  function partiallyApprovedGroup() {
+    return mrsGroup({
+      lines: [
+        {
+          itemDescription: 'Cement',
+          unit: 'bags',
+          // Requested 100, 60 approved, 40 formally refused.
+          requestedQty: 100,
+          approvedQty: 60,
+          rejectedQty: 40,
+          purchasedQty: 50,
+          receivedQty: 30,
+          procurementOutstanding: 10,
+          receivingOutstanding: 20,
+          complete: false,
+        },
+        {
+          itemDescription: 'Steel',
+          unit: 'pcs',
+          requestedQty: 50,
+          approvedQty: 50,
+          rejectedQty: 0,
+          purchasedQty: 50,
+          receivedQty: 50,
+          procurementOutstanding: 0,
+          receivingOutstanding: 0,
+          complete: true,
+        },
+      ],
+      totals: {
+        requested: 150,
+        approved: 110,
+        rejected: 40,
+        purchased: 100,
+        received: 80,
+        procurementOutstanding: 10,
+        receivingOutstanding: 20,
+      },
+    });
+  }
+
+  async function openTrackedModal() {
+    getMRSGroupedPage.mockResolvedValue({
+      rows: [partiallyApprovedGroup()],
+      total: 1,
+      counts: PO_COUNTS,
+      truncated: false,
+    });
+    const utils = await renderView();
+    toggle('MRS');
+    await waitForMRSView();
+    fireEvent.click(screen.getByRole('button', { name: 'Track' }));
+    return utils;
+  }
+
+  it('offers one Track control per material request', async () => {
+    getMRSGroupedPage.mockResolvedValue({
+      rows: [mrsGroup(), mrsGroup({ mrsNo: 'MRS-002', poCount: 2, pos: [poRow({ poNumber: 'PO-009' })] })],
+      total: 2,
+      counts: PO_COUNTS,
+      truncated: false,
+    });
+    await renderView();
+    toggle('MRS');
+    await waitForMRSView();
+
+    expect(screen.getAllByRole('button', { name: 'Track' })).toHaveLength(2);
+  });
+
+  it('opens the per-item breakdown', async () => {
+    await openTrackedModal();
+
+    await waitFor(() => expect(screen.getByText(/Items on MRS-001/)).toBeTruthy());
+    expect(screen.getByText('Cement')).toBeTruthy();
+    expect(screen.getByText('Steel')).toBeTruthy();
+  });
+
+  it('shows requested and approved as separate figures', async () => {
+    await openTrackedModal();
+    await waitFor(() => expect(screen.getByText(/Items on MRS-001/)).toBeTruthy());
+
+    const cementRow = screen.getByText('Cement').closest('tr') as HTMLElement;
+    // 100 requested and 60 approved. Collapsing the two would make this row read
+    // 100/100 and hide a 40-unit approval gap entirely.
+    expect(cementRow.textContent).toContain('100');
+    expect(cementRow.textContent).toContain('60');
+    expect(cementRow.textContent).toContain('40');
+  });
+
+  it('carries the totals row from the same aggregate', async () => {
+    await openTrackedModal();
+    await waitFor(() => expect(screen.getByText(/Items on MRS-001/)).toBeTruthy());
+
+    const totalRow = screen.getByText('TOTAL').closest('tr') as HTMLElement;
+    expect(totalRow.textContent).toContain('150');
+    expect(totalRow.textContent).toContain('110');
+  });
+
+  it('does not also toggle the row when Track is clicked', async () => {
+    const { container } = await openTrackedModal();
+    await waitFor(() => expect(screen.getByText(/Items on MRS-001/)).toBeTruthy());
+
+    // The row's own click expands the purchase orders. Track must not.
+    expect(dataRows(container)[0].getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('still expands the purchase orders when the row itself is clicked', async () => {
+    // The row keeps its own behaviour: Track is an addition, not a replacement.
+    getMRSGroupedPage.mockResolvedValue({
+      rows: [mrsGroup()],
+      total: 1,
+      counts: PO_COUNTS,
+      truncated: false,
+    });
+    const { container } = await renderView();
+    toggle('MRS');
+    await waitForMRSView();
+    clickRow(dataRows(container)[0]);
+
+    expect(dataRows(container)[0].getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('closes on the Close control', async () => {
+    await openTrackedModal();
+    await waitFor(() => expect(screen.getByText(/Items on MRS-001/)).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByText(/Items on MRS-001/)).toBeNull());
   });
 });

@@ -24,6 +24,10 @@ const statusStyles = {
   // Warehouse requests
   Approved: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',
   'Partially Approved': 'bg-[#fff3e0] text-[#ef6c00] border-[#ffcc80]',
+  // Some quantity approved, the remainder explicitly rejected, nothing owed.
+  // Slate, not amber: amber means a decision is still outstanding, and this one
+  // has none.
+  'Approval Closed': 'bg-gray-100 text-[#455a64] border-[#b0bec5]',
   Pending: 'bg-[#e3f2fd] text-[#1e3c72] border-[#90caf9]',
   Rejected: 'bg-red-50 text-red-700 border-red-300',
   Open: 'bg-[#e8f5e9] text-[#2e7d32] border-[#a5d6a7]',

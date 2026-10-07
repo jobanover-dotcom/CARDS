@@ -124,6 +124,10 @@ const REQUEST_COLUMNS: ReportColumn[] = [
   { key: 'unit', label: 'Unit' },
   { key: 'requestedQty', label: 'Requested Quantity', numeric: true },
   { key: 'approvedQty', label: 'Approved Quantity', numeric: true },
+  // Without this, "100 requested / 100 approved" and "100 requested / 60 approved
+  // / 40 rejected" produce identical report rows.
+  { key: 'rejectedQty', label: 'Rejected Quantity', numeric: true },
+  { key: 'approvalOutstanding', label: 'Approval Outstanding', numeric: true },
   { key: 'approvedBy', label: 'Approved By' },
   { key: 'poNumber', label: 'PO Number' },
   { key: 'purchasedQty', label: 'Purchased Quantity', numeric: true },
