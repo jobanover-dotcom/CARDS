@@ -124,3 +124,59 @@ describe('Dashboard tables', () => {
     }
   });
 });
+
+// PHASE 6 P6-01 — the dashboard must not promise a complete dataset it cannot
+// deliver. The Reports section runs the SAME bounded purchase-order scan
+// (WORKLOAD_SCAN_LIMIT), so when the scan truncates, both the counts here and the
+// reports below cover the same partial subset. Pointing the user at the Reports
+// section for "the full dataset" is then false.
+describe('Dashboard truncation messaging (P6-01)', () => {
+  const SECTION = {
+    poCount: 1,
+    itemCount: 500,
+    preview: Array.from({ length: 8 }, (_, i) => ({
+      poNumber: `PO-${i}`,
+      poItemId: `pi-${i}`,
+      itemDescription: `Cement ${i}`,
+      unit: 'bags',
+      approvedQty: 100,
+      purchasedQty: 0,
+      receivedQty: 0,
+      procurementOutstanding: 100,
+      receivingOutstanding: 100,
+      itemStatusLabel: 'Awaiting Receiving',
+    })),
+  };
+  const EMPTY = { poCount: 0, itemCount: 0, preview: [] };
+
+  async function renderWith(truncated: boolean) {
+    const { getDashboardOverview } = await import('@/actions/procurement');
+    vi.mocked(getDashboardOverview).mockResolvedValue({
+      counts: {},
+      receivingAttention: SECTION,
+      pendingPurchase: EMPTY,
+      discrepancies: EMPTY,
+      completed: EMPTY,
+      truncated,
+    } as never);
+    const DashboardView = (await import('@/components/admin/DashboardView')).default;
+    return render(<DashboardView />);
+  }
+
+  it('a complete scan still points the user at the Reports section', async () => {
+    const { container } = await renderWith(false);
+    await waitFor(() => expect(container.textContent).toContain('Cement 0'));
+    expect(container.textContent).toContain('use the Reports section below for the full dataset');
+  });
+
+  it('a truncated scan does NOT claim the full dataset is available elsewhere', async () => {
+    const { container } = await renderWith(true);
+    await waitFor(() => expect(container.textContent).toContain('Cement 0'));
+
+    // The false promise is gone.
+    expect(container.textContent).not.toContain('use the Reports section below for the full dataset');
+    // And the user is told why the counts are what they are.
+    expect(container.textContent).toMatch(/scan limit was reached/i);
+    expect(container.textContent).toMatch(/same scanned subset/i);
+  });
+});

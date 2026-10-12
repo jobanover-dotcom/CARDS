@@ -1,0 +1,30 @@
+-- Everything the warehouse cascade destroys that poData/requestData never held.
+--
+-- `WarehouseArchive.poData` is `PurchaseOrder.findMany({ include: { items: true } })`
+-- and `requestData` is the same for `WarehouseRequest`. Those two snapshots cover
+-- PurchaseOrderItem and WarehouseRequestItem, and nothing else. Deleting those
+-- parents then cascades (prisma/schema.prisma lines 122, 152, 218, 265, 300) to:
+--
+--   PurchaseOrderReceipt         the signed supplier receipt links
+--   PurchaseOrderMonitoringItem  the per-item monitoring rows
+--   ReceivingRecord              what physically arrived, per receiving event
+--   ReceivingDiscrepancy         the item-level exception record
+--   RequestApprovalLog           who approved or rejected a line, when and why
+--
+-- None of that was in the snapshot, so `restoreArchive` had nothing to restore it
+-- from. The receiving history and the approval trail — the two records a restored
+-- warehouse most needs to be trustworthy — were destroyed and unrecoverable. This
+-- is the finding already recorded at actions/pos.ts:606-615 ("a snapshot taken
+-- here would be readable but not restorable"); this column is the snapshot half of
+-- the fix, and restoreArchive now replays it.
+--
+-- NULLABLE, and no backfill. A pre-existing archive genuinely never captured this
+-- data, and a backfill would be fabrication. NULL is the marker those readers
+-- test for: the download degrades to blanks instead of implying that an empty
+-- cell means "nothing happened".
+--
+-- The old retired DEL-* delivery tables are deliberately out of scope. They
+-- cascade too, but restoring them would mean reviving the archived
+-- supplier-delivery workflow, and nothing in the current app writes them.
+
+ALTER TABLE "WarehouseArchive" ADD COLUMN "relatedData" JSONB;

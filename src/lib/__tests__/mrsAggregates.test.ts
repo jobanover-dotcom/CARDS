@@ -42,6 +42,8 @@ function po(
     status?: string;
     poType?: string | null;
     deliveries?: { status?: string | null }[];
+    /** open ReceivingDiscrepancy rows on this PO, counted by the reader */
+    openDiscrepancyCount?: number;
   },
 ): MRSPOContribution {
   return {
@@ -49,6 +51,7 @@ function po(
     status: opts.status ?? 'in_progress',
     poType: opts.poType ?? 'active-delivery',
     deliveries: opts.deliveries ?? [],
+    openDiscrepancyCount: opts.openDiscrepancyCount ?? 0,
     items: opts.items.map((i) => ({
       itemDescription: i.itemDescription,
       unit: i.unit ?? 'bags',
@@ -313,6 +316,104 @@ describe('discrepancies stay a separate concept from an outstanding quantity', (
     });
     expect(mrs.hasDiscrepancy).toBe(true);
     expect(mrs.bucket).toBe('discrepancy');
+  });
+
+  it('K — an open live flag rolls up as an MRS indicator', () => {
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [
+        po('PO-001', {
+          openDiscrepancyCount: 1,
+          items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 99 }],
+        }),
+      ],
+    });
+    expect(mrs.hasDiscrepancy).toBe(true);
+    expect(mrs.bucket).toBe('discrepancy');
+  });
+
+  it('K — clearing the last open flag clears the indicator', () => {
+    const base = {
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 99 }] })],
+    };
+    const withFlag = aggregateMRS({
+      ...base,
+      purchaseOrders: [po('PO-001', { openDiscrepancyCount: 1, items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 99 }] })],
+    });
+    const afterResolving = aggregateMRS(base);
+
+    expect(withFlag.hasDiscrepancy).toBe(true);
+    // Resolving takes the MRS back to whatever its own quantities say. The unit
+    // is still outstanding, so it is In Progress — and it left Discrepancies.
+    expect(afterResolving.hasDiscrepancy).toBe(false);
+    expect(afterResolving.bucket).toBe('in_progress');
+  });
+
+  it("J — one PO's flag does not mark its siblings discrepant", () => {
+    // Three POs on one MRS; only the middle one has a problem with its nails.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [
+        po('PO-001', { items: [{ itemDescription: 'Cement', qty: 40, purchasedQty: 40, receivedQty: 40 }] }),
+        po('PO-002', {
+          openDiscrepancyCount: 1,
+          items: [{ itemDescription: 'Cement', qty: 30, purchasedQty: 30, receivedQty: 29 }],
+        }),
+        po('PO-003', { items: [{ itemDescription: 'Cement', qty: 30, purchasedQty: 30, receivedQty: 30 }] }),
+      ],
+    });
+
+    // The MRS carries the indicator, because one of its POs does.
+    expect(mrs.hasDiscrepancy).toBe(true);
+    // Every PO is still listed, and the aggregation is untouched by the flag: no
+    // quantity was invented, removed or double-counted to represent it.
+    expect(mrs.poNumbers).toEqual(['PO-001', 'PO-002', 'PO-003']);
+    expect(mrs.totals.approved).toBe(100);
+    expect(mrs.totals.purchased).toBe(100);
+    expect(mrs.totals.received).toBe(99);
+    expect(mrs.totals.receivingOutstanding).toBe(1);
+  });
+
+  it("the archive flag and a live flag are independent", () => {
+    // Neither source implies the other, and neither is derived from the other.
+    const clean = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [po('PO-001', { items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 100 }] })],
+    });
+    expect(clean.hasDiscrepancy).toBe(false);
+
+    // Both at once still reads as one indicator, not two.
+    const both = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [
+        po('PO-001', {
+          poType: 'discrepancy',
+          openDiscrepancyCount: 2,
+          items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 100 }],
+        }),
+      ],
+    });
+    expect(both.hasDiscrepancy).toBe(true);
+  });
+
+  it('an archive-flagged MRS is not cleared by resolving live flags', () => {
+    // Nothing recorded WHY this PO was flagged before the procurement workflow,
+    // so there is nothing for the new resolution to close and it correctly
+    // stays in Discrepancies.
+    const mrs = aggregateMRS({
+      mrsNo: 'MRS-001',
+      requirementLines: [cement(100)],
+      purchaseOrders: [
+        po('PO-001', { poType: 'discrepancy', openDiscrepancyCount: 0, items: [{ itemDescription: 'Cement', qty: 100, purchasedQty: 100, receivedQty: 100 }] }),
+      ],
+    });
+    expect(mrs.hasDiscrepancy).toBe(true);
   });
 });
 

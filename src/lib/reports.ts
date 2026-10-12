@@ -76,11 +76,13 @@ const ITEM_INFO: ReportColumn[] = [
  *
  *   Receiving Outstanding  units bought but not yet in. Legitimate work, and
  *                          present on almost every in-flight PO.
- *   Qty Discrepancy       the same gap, but ONLY for a PO the existing
- *                          hasReceivingDiscrepancy() rule already flagged.
+ *   Qty Discrepancy       the same gap, but ONLY for a row that is an actual
+ *                          discrepancy — either flagged by the archive rule or
+ *                          carrying a live ReceivingDiscrepancy record.
  *
  * Keeping them apart is what stops an ordinary outstanding balance from being
- * reported as an exception.
+ * reported as an exception. A PO that is merely waiting for the rest of its
+ * delivery has both numbers and is not in the Discrepancy Report at all.
  */
 const QUANTITIES: ReportColumn[] = [
   { key: 'approvedQty', label: 'Approved Quantity', numeric: true },
@@ -108,6 +110,35 @@ const MONITORING: ReportColumn[] = [
   { key: 'poStatus', label: 'PO Status' },
   { key: 'discrepancyFlag', label: 'Discrepancy Flag' },
   { key: 'qtyDiscrepancy', label: 'Qty Discrepancy', numeric: true },
+]
+
+/**
+ * The discrepancy itself, as the Warehouse Checker reported it and as the
+ * purchaser closed it.
+ *
+ * Every field is read from the ReceivingDiscrepancy row, never derived from a
+ * balance: a report must be able to show "1 damaged out of 50" as words someone
+ * actually wrote, not as a subtraction. That is also why there is no quantity
+ * here — the quantities are already in QUANTITIES above, straight off the
+ * APPROVED -> PURCHASED -> RECEIVED chain.
+ *
+ * Resolved rows appear in this report alongside open ones. Dropping them would
+ * make Resolved By / Resolved Date / Resolution unreachable and would erase the
+ * fact that a problem was ever raised.
+ *
+ * ITEM-LEVEL because the exception is. A delivery of fifty bags of cement and
+ * fifty boxes of nails is one purchase order and one delivery, but two separate
+ * physical checks; the report must be able to say the nails were the problem.
+ */
+const DISCREPANCY: ReportColumn[] = [
+  { key: 'discrepancyType', label: 'Discrepancy Type' },
+  { key: 'discrepancyRemarks', label: 'Discrepancy Remarks' },
+  { key: 'discrepancyStatus', label: 'Discrepancy Status' },
+  { key: 'reportedBy', label: 'Reported By' },
+  { key: 'reportedAt', label: 'Reported Date' },
+  { key: 'resolvedBy', label: 'Resolved By' },
+  { key: 'resolvedAt', label: 'Resolved Date' },
+  { key: 'resolution', label: 'Resolution' },
 ]
 
 /**
@@ -170,9 +201,12 @@ export const REPORT_DEFINITIONS: Record<ReportType, ReportDefinition> = {
     type: 'discrepancy',
     name: 'Discrepancy Report',
     description:
-      'Only items on purchase orders the existing receiving-discrepancy rule has flagged. An unflagged outstanding balance is legitimate work and never appears here.',
+      'Only items with a receiving discrepancy, open or resolved: what the warehouse reported, who reported it, and how it was dealt with. An unflagged outstanding balance is legitimate work and never appears here.',
     accent: 'red',
-    columns: [...PO_INFO, ...ITEM_INFO, ...QUANTITIES, ...MONITORING, ...ACCOUNTABILITY, ...DATES],
+    // DISCREPANCY replaces MONITORING's generic flag columns: this report is
+    // entirely about the exception, so it shows the exception itself rather than
+    // the two summary columns that exist to orient a reader elsewhere.
+    columns: [...PO_INFO, ...ITEM_INFO, ...QUANTITIES, ...DISCREPANCY, ...ACCOUNTABILITY, ...DATES],
   },
 }
 
@@ -189,11 +223,41 @@ export function reportDefinition(type: ReportType): ReportDefinition {
 
 // --- Row value resolution ---------------------------------------------------
 
-/** Columns are derived, never stored: they mirror the boolean + quantity pair. */
-function cellValue(row: Record<string, unknown>, key: string): string | number | null {
+/**
+ * The one value resolver for a report column.
+ *
+ * Exported so the CSV export and the ExcelJS workbook resolve every column
+ * through the same function. They used to carry separate copies of the
+ * discrepancy and date special cases, which is exactly the kind of duplication
+ * that lets a spreadsheet quietly disagree with its own CSV the next time a
+ * column is added.
+ *
+ * The discrepancy columns read out of the nested `discrepancy` row rather than
+ * being flattened onto the report row. A resolved discrepancy still reads "Yes"
+ * in the flag column — it happened, and hiding that would make a report of
+ * resolved rows look like a report of nothing at all.
+ */
+export function cellValue(row: Record<string, unknown>, key: string): string | number | null {
+  const discrepancy = (row.discrepancy ?? null) as Record<string, unknown> | null
   switch (key) {
     case 'discrepancyFlag':
-      return row.hasDiscrepancy === true ? 'Yes' : 'No'
+      return row.hasDiscrepancy === true || discrepancy ? 'Yes' : 'No'
+    case 'discrepancyType':
+      return (discrepancy?.discrepancyType as string) ?? null
+    case 'discrepancyRemarks':
+      return (discrepancy?.remarks as string) ?? null
+    case 'discrepancyStatus':
+      return (discrepancy?.statusLabel as string) ?? null
+    case 'reportedBy':
+      return (discrepancy?.reportedBy as string) ?? null
+    case 'reportedAt':
+      return formatDate(discrepancy?.reportedAt)
+    case 'resolvedBy':
+      return (discrepancy?.resolvedBy as string) ?? null
+    case 'resolvedAt':
+      return formatDate(discrepancy?.resolvedAt)
+    case 'resolution':
+      return (discrepancy?.resolution as string) ?? null
     case 'purchaseDate':
     case 'receivedDate':
       return formatDate(row[key])

@@ -37,6 +37,10 @@ const HISTORY_LABELS = {
   supplier_changed: 'Supplier changed',
   receiving_recorded: 'Receiving recorded',
   receiving_remarks: 'Receiving remarks',
+  // A discrepancy is a decision someone recorded about a delivery, so it has to
+  // read in the PO's own history rather than only inside the Discrepancies modal.
+  discrepancy_reported: 'Discrepancy reported',
+  discrepancy_resolved: 'Discrepancy resolved',
   po_completed: 'PO completed',
   purchase_confirmed: 'Purchase confirmed',
   receiving_confirmed: 'Receiving confirmed',
@@ -53,6 +57,7 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
   const [purchased, setPurchased] = useState({});
   const [supplier, setSupplier] = useState('');
   const [supplierAddress, setSupplierAddress] = useState('');
+  const [supplierRrDrNo, setSupplierRrDrNo] = useState('');
   const [remarks, setRemarks] = useState('');
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -95,6 +100,7 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
         setPurchased(seed);
         setSupplier(t.supplier || '');
         setSupplierAddress(t.supplierAddress || '');
+        setSupplierRrDrNo(t.supplierRrDrNo || '');
         getPOAuditLog(poNumber, 25).then((h) => { if (!cancelled) setHistory(h); }).catch(() => {});
       } catch (e) {
         if (!cancelled) setError(e?.message || 'Failed to load purchase order.');
@@ -145,6 +151,7 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
         items: payload,
         supplier: supplier.trim(),
         supplierAddress: supplierAddress.trim() || undefined,
+        supplierRrDrNo: supplierRrDrNo.trim() || undefined,
         remarks: remarks.trim() || undefined,
       });
       const remaining = result?.tracker?.totals?.procurementOutstanding ?? 0;
@@ -325,6 +332,20 @@ function PurchaseWorkflowModal({ poNumber, onClose, onChanged }) {
                   className={inputClass}
                 />
               </div>
+            </div>
+            {/* The supplier's OWN Receiving Report / Delivery Receipt number, as
+                printed on their paperwork — not the CARDS PO number. Optional:
+                it may not be known yet when the purchase is saved. */}
+            <div className="flex flex-col gap-1.5 mt-2">
+              <label className={labelClass}>SUPPLIER RR/DR NO. (OPTIONAL)</label>
+              <input
+                type="text"
+                value={supplierRrDrNo}
+                onChange={(e) => setSupplierRrDrNo(e.target.value)}
+                maxLength={100}
+                className={inputClass}
+                placeholder="Supplier's RR/DR number from their document"
+              />
             </div>
 
             <div className="flex justify-end mt-4">

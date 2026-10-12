@@ -5,6 +5,7 @@ import POQuantityTracker from '../shared/POQuantityTracker';
 import {
   actionPrimary,
   actionPurchase,
+  actionDestructive,
   actionSecondary,
   metaLabel,
   metaSub,
@@ -27,7 +28,7 @@ import { PO_PROGRESS_LABEL } from '../../lib/deliveryQuantities';
 // The purchase-order table has six columns. Both views render that same width —
 // the MRS view groups POs under a material request without introducing a seventh
 // column — so the expanded detail spans exactly what the header declares.
-export const PO_COL_SPAN = 6;
+export const PO_COL_SPAN = 7;
 
 // ONE purchase-order row, shared by both views on the Purchase Orders page:
 //
@@ -73,6 +74,7 @@ export function poRowStatusLabel(order) {
  * @param onFollowUp      open Follow-up Purchase (raises a NEW PO on the MRS)
  * @param onOpenReceipt   open the material request receipt
  * @param onOpenSupplierReceipts  open the supplier delivery receipts, when any
+ * @param onEditSupplierRrDrNo  open the Supplier RR/DR No. editor for this PO
  */
 function PORow({
   order,
@@ -84,6 +86,8 @@ function PORow({
   onFollowUp,
   onOpenReceipt,
   onOpenSupplierReceipts,
+  onOpenDiscrepancies,
+  onEditSupplierRrDrNo,
 }) {
   const isCancelled = poLifecycle(order.status) === PO_STATUS.CANCELLED.value;
   const statusLabel = poRowStatusLabel(order);
@@ -139,6 +143,9 @@ function PORow({
         </td>
         <td className={tdStrong}>{order.requisitioner}</td>
         <td className={tdEl}>{order.supplier || <span className="text-[#bbb]">&mdash;</span>}</td>
+        {/* The supplier's own RR/DR number from their paperwork — not the CARDS
+            PO number. Its own column so it stays visible without expanding. */}
+        <td className={`${tdEl} whitespace-nowrap`}>{order.supplierRrDrNo || <span className="text-[#bbb]">&mdash;</span>}</td>
         <td className={`${tdEl} whitespace-nowrap`}>
           {order.itemLines.length} item{order.itemLines.length === 1 ? '' : 's'}
         </td>
@@ -170,6 +177,25 @@ function PORow({
                 <MetaField label="REQUISITIONER" value={order.requisitioner} />
                 <MetaField label="SUPPLIER" value={order.supplier} />
                 <MetaField label="SUPPLIER ADDRESS" value={order.supplierAddress} />
+                {/* The supplier's own RR/DR number from their paperwork — not the
+                    CARDS PO number. Always rendered (never hidden when empty) so
+                    the purchaser can see at a glance whether it is still missing,
+                    with an edit affordance beside it. */}
+                <div>
+                  <div className={metaLabel}>SUPPLIER RR/DR NO.</div>
+                  <div className={metaValue}>
+                    {order.supplierRrDrNo || <span className="text-[#bbb]">&mdash;</span>}
+                    {onEditSupplierRrDrNo && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onEditSupplierRrDrNo(order.poNumber); }}
+                        title="Set the supplier's RR/DR number for this purchase order"
+                        className="ml-2 text-[11px] font-semibold text-[#006680] underline underline-offset-2 hover:text-[#00536b]"
+                      >
+                        Edit
+                      </button>
+                    )}
+                  </div>
+                </div>
                 <MetaField label="MRS NO." value={order.mrsNo} />
                 <MetaField label="PO DATE" value={order.date} />
                 <MetaField label="WAREHOUSE" value={order.warehouse} />
@@ -189,6 +215,21 @@ function PORow({
                 variant="table"
                 actionSlot={
                   <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-[#eee]">
+                    {/* Unresolved receiving discrepancies, per LINE. Offered only
+                        when there is at least one open flag, so it opens onto
+                        something to read rather than leading to an empty view —
+                        the same rule the supplier-receipts button follows. The
+                        count is on the label because one PO can have several,
+                        and "Discrepancies (2)" is more honest than a single
+                        undifferentiated button. */}
+                    {order.openDiscrepancyCount > 0 && (
+                      <button
+                        onClick={() => onOpenDiscrepancies(order)}
+                        className={`${actionDestructive} py-2 px-4`}
+                      >
+                        Discrepancies ({order.openDiscrepancyCount})
+                      </button>
+                    )}
                     {/* The receipt is the source document this PO was raised from;
                         it is always available, whatever the quantities. */}
                     <button onClick={() => onOpenReceipt(order)} className={`${actionSecondary} py-2 px-4`}>

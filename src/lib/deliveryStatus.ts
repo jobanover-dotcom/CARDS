@@ -145,6 +145,13 @@ export const ACTIVE_LIFECYCLE_STATUSES: string[] = [
 // Historical archive helpers. These describe retired workflow concepts and
 // exist only to read/label archived Delivery rows. They drive no card, no
 // filter and no transition in the current workflow.
+//
+// hasReceivingDiscrepancy() below is the exception, and deliberately so: it is
+// still on the live read path (the Discrepancies card, the MRS indicator, the
+// Discrepancy Report) but both of its inputs are frozen, because nothing in the
+// current workflow can write either one. It is kept verbatim so historical rows
+// keep reporting the way they always have, and is OR-ed with the live records
+// below rather than replaced. See isDiscrepancyPO().
 // ---------------------------------------------------------------------------
 
 /**
@@ -167,3 +174,58 @@ export function hasReceivingDiscrepancy(po: DiscrepancyCheckPO | null | undefine
 
 // poType is a legacy category only — never a workflow or result state.
 export const PO_TYPE_ACTIVE_DELIVERY = 'active-delivery'
+
+// ---------------------------------------------------------------------------
+// ACTIVE receiving discrepancies.
+//
+// NOT the same thing as the archive helpers above. Those read frozen flags left
+// on pre-V1 rows; these describe the live records a Warehouse Checker writes
+// today, one per PO item found unacceptable.
+// ---------------------------------------------------------------------------
+
+export const RECEIVING_DISCREPANCY_STATUS = entries({
+  OPEN: { value: 'open', label: 'Open' },
+  RESOLVED: { value: 'resolved', label: 'Resolved' },
+} as const)
+
+/**
+ * Starting points offered in the Discrepancy Type field, and nothing more.
+ *
+ * The stored value is whatever the checker actually typed. This list is a UX
+ * affordance — an empty field shows all of them, typing filters them, tapping
+ * one fills the field — so it must never become a vocabulary the checker is
+ * held to. "Supplier sent 40mm bar instead of 50mm" is a valid answer that no
+ * fixed list could contain, and is exactly the kind of report an enum would
+ * have thrown away.
+ */
+export const RECEIVING_DISCREPANCY_SUGGESTIONS = [
+  'Short Quantity',
+  'Wrong Item',
+  'Wrong Specification',
+  'Damaged Item',
+  'Missing Item',
+  'Other',
+] as const
+
+/**
+ * Whether a purchase order belongs in the Discrepancies queue.
+ *
+ * The union of two unrelated sources, and the union is the point:
+ *
+ *   - the archive flag (poType, or an archived Delivery row), which predates the
+ *     procurement workflow, has no current writer, and therefore cannot be
+ *     resolved either. Replacing it would silently drop historical POs out of
+ *     the section and out of the report, so it stays.
+ *   - live open ReceivingDiscrepancy rows, which the current workflow can write
+ *     and the purchaser can resolve.
+ *
+ * Consequence, stated plainly: resolving every live row drops a PO out of the
+ * queue UNLESS it also carries the archive flag — which stays put, because
+ * nothing recorded why it was flagged and so there is nothing to resolve.
+ */
+export function isDiscrepancyPO(input: {
+  legacyFlagged: boolean
+  openDiscrepancies: number
+}): boolean {
+  return input.legacyFlagged || input.openDiscrepancies > 0
+}

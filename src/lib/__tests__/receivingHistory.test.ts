@@ -111,6 +111,12 @@ function tx() {
         return row;
       },
     },
+    receivingDiscrepancy: {
+      // These tests are about quantities and history, so the flag table is empty
+      // throughout — but the read has to exist, because the receiving path asks
+      // for it on every save to refuse a duplicate open report.
+      findMany: async () => [],
+    },
     deliveryAuditLog: {
       create: async (args: any) => {
         db.audit.push(args.data);

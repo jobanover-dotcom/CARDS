@@ -3,6 +3,12 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useAdminData } from '../../context/AdminDataContext';
 
+// Mirrors MAX_REQUEST_QTY in src/lib/validations/request.ts, which the server
+// action applies. Duplicated as a literal because the form is a client component
+// and importing the module would pull Zod into the bundle for one number; the
+// constant's own test asserts both sides agree.
+const MAX_PO_ITEM_QTY = 2147483647;
+
 function makeEmptyItem() { return { itemDescription: '', qty: '', unit: 'pcs', maxQty: null }; }
 
 // One PO creation form, two modes.
@@ -84,6 +90,12 @@ function POCreationForm({ onClose, onSuccess, initialData = null }) {
     }
     for (const it of items) {
       const qty = Number(it.qty);
+      // Mirrors the server ceiling in actions/pos.ts validateItems, so the form
+      // and the action agree. The server enforces it regardless.
+      if (qty > MAX_PO_ITEM_QTY) {
+        setSubmitError(`Quantity for "${it.itemDescription}" cannot exceed ${MAX_PO_ITEM_QTY.toLocaleString()}.`);
+        return;
+      }
       if (it.maxQty != null && qty > it.maxQty) {
         // The cap reads differently per mode because it comes from a different
         // balance. An approval handoff is capped by the approval the purchaser

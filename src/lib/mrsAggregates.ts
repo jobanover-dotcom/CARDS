@@ -34,7 +34,13 @@ import {
   type POItemChain,
   type POProgressStatus,
 } from './deliveryQuantities'
-import { hasReceivingDiscrepancy, poLifecycle, PO_STATUS, type DiscrepancyCheckPO } from './deliveryStatus'
+import {
+  hasReceivingDiscrepancy,
+  isDiscrepancyPO,
+  poLifecycle,
+  PO_STATUS,
+  type DiscrepancyCheckPO,
+} from './deliveryStatus'
 
 /**
  * The one description comparison used to line a PO up with a requirement.
@@ -94,6 +100,15 @@ export interface MRSPOContribution extends DiscrepancyCheckPO {
     purchasedQty: number | null
     receivedQty: number
   }[]
+  /**
+   * Open discrepancies on THIS PO, counted by the reader.
+   *
+   * Optional, and absent for callers that do not read the flag. Kept as a count
+   * rather than a boolean so the roll-up below can tell "flagged by the archive
+   * rule, which is PO-level" apart from "flagged on one line", which is what
+   * sizes a report figure correctly.
+   */
+  openDiscrepancyCount?: number
 }
 
 export interface MRSLine {
@@ -136,7 +151,14 @@ export interface MRSAggregate {
   progressStage: POProgressStatus
   /** the aggregate's section, from the same helper a PO uses */
   bucket: POBucket
-  /** true if any PO on this MRS carries the existing receiving-discrepancy flag */
+  /**
+   * True if any PO on this MRS has an unresolved discrepancy.
+   *
+   * An INDICATOR, never a quantity and never an MRS lifecycle state. One PO out
+   * of three having a flagged line does not make its siblings discrepant, and the
+   * approved/purchased/received totals above are unaffected by this flag in either
+   * direction — nothing here adds to or subtracts from a balance.
+   */
   hasDiscrepancy: boolean
   /** every PO on this MRS, including cancelled ones */
   poNumbers: string[]
@@ -244,6 +266,17 @@ export function aggregateMRS(input: {
   // The aggregate is reported through the SAME helpers a single PO uses, so an
   // MRS can never show a stage or a section its own quantities disagree with.
   const progressStage = derivePOProgressStatus(lines)
+  // An MRS has an unresolved discrepancy if ANY of its purchase orders does, by
+  // either source. Each PO is judged on its own — a sibling with a clean
+  // delivery is never dragged in by the PO that has a problem — and the flag
+  // travels no further than the MRS indicator below.
+  const hasDiscrepancy = purchaseOrders.some((po) =>
+    isDiscrepancyPO({
+      legacyFlagged: hasReceivingDiscrepancy(po),
+      openDiscrepancies: po.openDiscrepancyCount ?? 0,
+    }),
+  )
+
   return {
     mrsNo: input.mrsNo,
     sourceReqNumber: input.sourceReqNumber ?? null,
@@ -257,9 +290,38 @@ export function aggregateMRS(input: {
       approved: totals.approved,
       purchased: totals.purchased,
       received: totals.received,
-      hasDiscrepancy: purchaseOrders.some((po) => hasReceivingDiscrepancy(po)),
+      hasDiscrepancy,
     }),
-    hasDiscrepancy: purchaseOrders.some((po) => hasReceivingDiscrepancy(po)),
+    hasDiscrepancy,
     poNumbers: purchaseOrders.map((po) => po.poNumber),
   }
+}
+
+/**
+ * Sums submitted item lines by normalized description.
+ *
+ * The authoritative MRS read matches items by `normalizeItemDescription`
+ * (trim + lowercase), so anything that validates against an MRS allowance must
+ * aggregate on the SAME key — otherwise a quantity that passes the check and the
+ * quantity the MRS later sums can differ.
+ *
+ * Why this exists: `assertWithinMRSAllowance` and `validateApprovedPOItems` in
+ * actions/pos.ts each looped the submitted lines and compared `item.qty`
+ * independently against one remaining figure. Two lines of 30 for the same
+ * description against a 40 allowance both passed, and both were persisted — 60
+ * committed against 40. It is the same defect Phase 2 fixed for
+ * `createRequest` (P2-07); the PO path was not touched by that remediation.
+ *
+ * The lines themselves are NOT merged or discarded: a PO keeps every line it was
+ * given, so what is validated equals what is persisted.
+ */
+export function aggregateItemQuantities(
+  items: readonly { itemDescription: string; qty: number }[],
+): Map<string, number> {
+  const totals = new Map<string, number>()
+  for (const item of items) {
+    const key = normalizeItemDescription(item.itemDescription)
+    totals.set(key, (totals.get(key) ?? 0) + item.qty)
+  }
+  return totals
 }

@@ -10,7 +10,9 @@ import SupplierReceiptsModal from '../shared/SupplierReceiptsModal';
 import POCreationForm from './POCreationForm';
 import PORow, { PO_COL_SPAN } from './PORow';
 import PurchaseWorkflowModal from './PurchaseWorkflowModal';
+import EditSupplierRrDrNoModal from './EditSupplierRrDrNoModal';
 import MRSItemsModal from './MRSItemsModal';
+import DiscrepancyDetailModal from './DiscrepancyDetailModal';
 import StatusBadge from '../ui/StatusBadge';
 import PageSkeleton from '../ui/PageSkeleton';
 import TableSkeleton from '../ui/TableSkeleton';
@@ -90,17 +92,18 @@ const IN_PROGRESS_OPTIONS = IN_PROGRESS_FILTER_KEYS.map((value) => ({
   label: value === 'all' ? 'All' : PO_PROGRESS_LABEL[value],
 }));
 
-const COLUMNS = ['PO', 'Requisitioner', 'Supplier', 'Items', 'Status', 'Actions'];
+const COLUMNS = ['PO', 'Requisitioner', 'Supplier', 'Supplier RR/DR', 'Items', 'Status', 'Actions'];
 
-// The MRS view keeps the SAME six columns as the purchase-order view, so a PO
+// The MRS view keeps the SAME seven columns as the purchase-order view, so a PO
 // nested under a material request renders from the identical PORow component
 // with no second column set to keep in step. Only the top-level row changes.
 //
-// Column 3 is Supplier in BOTH views, so a PO reads the same under either header.
-// The two lists differ only at index 0 (PO vs MRS) and 4 (Items vs POs); a test
+// Column 3 is Supplier and column 4 is Supplier RR/DR in BOTH views, so a PO
+// reads the same under either header.
+// The two lists differ only at index 0 (PO vs MRS) and 5 (Items vs POs); a test
 // pins that, because a header drifting in one view only is what let a Warehouse
 // column sit beside a Requisitioner column holding the same value.
-const MRS_COLUMNS = ['MRS', 'Requisitioner', 'Supplier', 'POs', 'Status', 'Actions'];
+const MRS_COLUMNS = ['MRS', 'Requisitioner', 'Supplier', 'Supplier RR/DR', 'POs', 'Status', 'Actions'];
 const COL_SPAN = PO_COL_SPAN;
 
 const inputClass = 'py-2 px-3 border border-[#ccc] rounded-md text-[13px] text-[#333] bg-gray-50';
@@ -225,7 +228,12 @@ function PurchaseOrderContent() {
   // warehouse has attached some, so they are tracked separately from the MRS
   // receipt above — that one is always available, this one never is at first.
   const [supplierReceiptPo, setSupplierReceiptPo] = useState(null);
+  // The PO whose receiving discrepancies are being investigated.
+  const [discrepancyPoNumber, setDiscrepancyPoNumber] = useState(null);
   const [workflowPoNumber, setWorkflowPoNumber] = useState(null);
+  // The PO whose Supplier RR/DR No. is being edited. The context action bumps
+  // poVersion on save, so the row reloads with the new reference in place.
+  const [editRrDrPoNumber, setEditRrDrPoNumber] = useState(null);
   // Follow-up Purchase reuses the PO creation form, seeded server-side with the
   // locked MRS and how much of its requirement is genuinely still unpurchased.
   const [followUp, setFollowUp] = useState(null);
@@ -364,6 +372,10 @@ function PurchaseOrderContent() {
   };
 
   const openSupplierReceipts = (order) => setSupplierReceiptPo(order);
+  // The Discrepancies section is the entry point; the modal is only where its rows
+  // go. No new navigation item, so there is exactly one place that answers
+  // "which POs have an open discrepancy".
+  const openDiscrepancies = (order) => setDiscrepancyPoNumber(order.poNumber);
 
   // Follow-up Purchase: open the existing PO creation form, seeded by the server
   // with the locked MRS and the requirement-wide remainder.
@@ -516,6 +528,8 @@ function PurchaseOrderContent() {
                               onFollowUp={openFollowUp}
                               onOpenReceipt={openReceipt}
                               onOpenSupplierReceipts={openSupplierReceipts}
+                              onOpenDiscrepancies={openDiscrepancies}
+                              onEditSupplierRrDrNo={setEditRrDrPoNumber}
                             />
                           ))}
                         </React.Fragment>
@@ -534,6 +548,8 @@ function PurchaseOrderContent() {
                           onFollowUp={openFollowUp}
                           onOpenReceipt={openReceipt}
                           onOpenSupplierReceipts={openSupplierReceipts}
+                          onOpenDiscrepancies={openDiscrepancies}
+                          onEditSupplierRrDrNo={setEditRrDrPoNumber}
                           striped={index % 2 === 0}
                         />
                       ))}
@@ -602,6 +618,13 @@ function PurchaseOrderContent() {
         <MaterialRequestReceipt po={selectedReceiptPo} onDelete={deletePO} onClose={() => { setShowReceiptModal(false); setSelectedReceiptPo(null); }} />
       )}
 
+      {discrepancyPoNumber && (
+        <DiscrepancyDetailModal
+          poNumber={discrepancyPoNumber}
+          onClose={() => setDiscrepancyPoNumber(null)}
+        />
+      )}
+
       {supplierReceiptPo && (
         <SupplierReceiptsModal po={supplierReceiptPo} onClose={() => setSupplierReceiptPo(null)} />
       )}
@@ -610,6 +633,10 @@ function PurchaseOrderContent() {
         // Left expanded on save: poVersion bumps, the row reloads, and the
         // refreshed quantities are visible in place.
         <PurchaseWorkflowModal poNumber={workflowPoNumber} onClose={() => setWorkflowPoNumber(null)} />
+      )}
+
+      {editRrDrPoNumber && (
+        <EditSupplierRrDrNoModal poNumber={editRrDrPoNumber} onClose={() => setEditRrDrPoNumber(null)} />
       )}
     </div>
   );

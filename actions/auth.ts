@@ -64,7 +64,32 @@ export async function getSession() {
   return { id: profile.id, username: profile.username, name: profile.name, role: profile.role, warehouse: profile.warehouse };
 }
 
+/**
+ * Self-service password change.
+ *
+ * The caller must be signed in AND the `username` argument must be their own.
+ * Previously this action called neither `getCurrentUser()` nor compared the
+ * requested account against the session, so it functioned as a second,
+ * unguarded login-and-mutate path: with no session at all it would still
+ * re-authenticate as any account whose current password it could supply, and a
+ * signed-in Warehouse user could set a Superadmin's password.
+ *
+ * The `signInWithPassword` re-authentication below is unchanged — it is what
+ * proves the user knows their CURRENT password, and the UI's Settings pages for
+ * all three roles pass `user.username`. Privileged resets belong to
+ * `adminResetPassword`, which has its own Admin/Superadmin check.
+ *
+ * This verifies identity; it does not impose a password policy. The one
+ * character password observed during the audit is reported separately, because
+ * no approved password policy exists in this project.
+ */
 export async function changePassword(username: string, currentPassword: string, newPassword: string) {
+  const caller = await getCurrentUser();
+  if (!caller) return { error: 'Unauthorized: you must be signed in to change your password' };
+  if (caller.username !== username) {
+    return { error: 'Unauthorized: you can only change your own password' };
+  }
+
   const supabase = await createServerSupabase();
   const email = `${username}${EMAIL_DOMAIN}`;
 
@@ -95,6 +120,24 @@ export async function adminResetPassword(username: string) {
   return { success: true };
 }
 
+/**
+ * Profile read used by the Settings pages.
+ *
+ * Every caller passes `user.username` — their OWN account (SuperadminSettingsView,
+ * PurchaserSettingsView, warehouse/SettingsView, all via AuthContext.getUserInfo).
+ * So the policy is: signed in, and only your own profile. An elevated role may
+ * additionally read another account, because the users administration page needs
+ * to view the users it manages.
+ *
+ * Previously this was completely unauthenticated and returned the whole Profile
+ * row — id, role and warehouse — for any username, which both disclosed the role
+ * of every account and let a caller enumerate usernames.
+ */
 export async function getProfileByUsername(username: string) {
+  const caller = await getCurrentUser();
+  if (!caller) throw new Error('Unauthorized');
+  if (caller.username !== username && caller.role !== 'Admin' && caller.role !== 'Superadmin') {
+    throw new Error('Unauthorized: you can only view your own profile');
+  }
   return prisma.profile.findUnique({ where: { username } });
 }

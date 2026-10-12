@@ -123,6 +123,13 @@ function tx() {
       findMany: async (args: any) =>
         db.log.filter((l) => l.reqNumber === args?.where?.reqNumber).slice().reverse(),
     },
+    purchaseOrder: {
+      // Approving re-divides the requirement, so finalizeApproval reconciles the
+      // purchase orders on the MRS afterwards. These fixtures describe none, and
+      // none can be stranded by a decision when there is no purchase order to read:
+      // an empty scan settles nothing and writes no status.
+      findMany: async () => [],
+    },
     // The row lock is advisory; a no-op is enough for these tests. Its call count
     // is recorded so a test can confirm the balance is read under it.
     $queryRaw: async () => {

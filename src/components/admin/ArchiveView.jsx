@@ -19,8 +19,9 @@ import {
   trEl,
   trHover,
 } from '../ui/tableTheme';
-import { getArchiveEntries, recordArchiveDownload, restoreArchive, getArchiveActivity, deleteArchiveEntry } from '../../../actions/archive';
-import ExcelJS from 'exceljs';
+import { getArchiveEntries, getArchiveMeta, getArchiveReportRows, restoreArchive, getArchiveActivity, deleteArchiveEntry } from '../../../actions/archive';
+import { buildReportWorkbook, downloadWorkbook } from '../../lib/reportWorkbook';
+import { REPORT_ORDER } from '../../lib/reports';
 
 const ENTRY_COLUMNS = ['Warehouse Name', 'Date of Clearing', 'Type', '# Purchase Orders', '# Requests'];
 const ENTRY_SPAN = ENTRY_COLUMNS.length;
@@ -92,50 +93,38 @@ function ArchiveView() {
 
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+  /**
+   * The archived records, in the same four-sheet, item-level workbook the
+   * dashboard's "Export all (Excel)" produces.
+   *
+   * The rows are shaped SERVER-side by getArchiveReportRows(), which runs the
+   * archived snapshot through the same definitions and the same value resolver as
+   * the live report, and the bytes come from the shared builder in
+   * src/lib/reportWorkbook.ts. That is deliberate: an archive that used its own
+   * column list would still look authoritative while quietly disagreeing with
+   * the dashboard, which is worse than having no export at all.
+   *
+   * One row per item, not per order — a purchase order of three materials is
+   * three rows, exactly as the live report reads.
+   */
   const handleDownload = async () => {
     setBusy(true);
     try {
-      const snap = await recordArchiveDownload(selectedEntry.id);
-      const wb = new ExcelJS.Workbook();
-
-      const poHeaders = ['PO date', 'PO number', 'Item Description', 'Qty', 'Supplier Name', 'Requisitioner', 'MRS No.', 'Pick-up by', 'Status'];
-      const poRows = (snap.poData || []).map(o => [
-        o.date, o.poNumber,
-        (o.items || []).map(i => i.itemDescription).join('; '),
-        (o.items || []).map(i => `${i.qty} ${i.unit}`).join('; '),
-        o.supplier, o.requisitioner, o.mrsNo, o.pickupBy, o.statusLabel || o.status,
+      const [rows, meta] = await Promise.all([
+        getArchiveReportRows(selectedEntry.id),
+        getArchiveMeta(selectedEntry.id),
       ]);
-      const wsPO = wb.addWorksheet('Purchase Orders');
-      wsPO.columns = [{ width: 12 }, { width: 16 }, { width: 28 }, { width: 14 }, { width: 20 }, { width: 20 }, { width: 14 }, { width: 18 }, { width: 14 }];
-      wsPO.addRow(poHeaders);
-      poRows.forEach(r => wsPO.addRow(r));
-
-      const reqHeaders = ['Request Date', 'REQ No.', 'MRS No.', 'Item Description', 'Qty', 'Requested By', 'Requisitioner', 'Approved Qty', 'Status'];
-      const reqRows = (snap.requestData || []).map(r => [
-        r.date, r.reqNumber, r.mrsNo,
-        (r.items || []).map(i => i.itemDescription).join('; '),
-        (r.items || []).map(i => `${i.qty} ${i.unit}`).join('; '),
-        r.requestedBy, r.requisitioner,
-        (r.items || []).some(i => i.approvedQty != null) ? (r.items || []).reduce((s, i) => s + (i.approvedQty ?? 0), 0) : '',
-        r.status,
-      ]);
-      const wsReq = wb.addWorksheet('Requests');
-      wsReq.columns = [{ width: 12 }, { width: 14 }, { width: 14 }, { width: 28 }, { width: 14 }, { width: 18 }, { width: 20 }, { width: 12 }, { width: 18 }];
-      wsReq.addRow(reqHeaders);
-      reqRows.forEach(r => wsReq.addRow(r));
-
-      const d = new Date(snap.clearedAt);
+      const blob = await buildReportWorkbook(
+        REPORT_ORDER.map((report) => ({ report, rows: rows[report] })),
+        {
+          subtitle: `Warehouse: ${meta.warehouseName} · ${
+            meta.reason === 'deleted' ? 'Deleted warehouse' : 'Cleared by system reset'
+          } · Archived ${new Date(meta.clearedAt).toISOString().slice(0, 10)}`,
+        },
+      );
+      const d = new Date(meta.clearedAt);
       const ts = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      const buffer = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${snap.warehouseName.replace(/\s+/g, '_')}_${ts}_Archive.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      downloadWorkbook(blob, `${meta.warehouseName.replace(/\s+/g, '_')}_${ts}_Archive.xlsx`);
       setSelectedEntry(null);
       loadActivity();
     } catch (e) {

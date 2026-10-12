@@ -178,7 +178,7 @@ function RequestDetailsModal({ request, onClose }) {
             })}
             {isPartial && (
               <p className="m-0 text-xs text-[#f57c00] font-semibold">
-                Partial approval — {totalApproved} of {totalRequested} total units approved. The remaining balance stays on this request for the warehouse to file a follow-up.
+                Partial approval — {totalApproved} of {totalRequested} total units approved. The remaining balance stays on this request for follow up.
               </p>
             )}
           </div>

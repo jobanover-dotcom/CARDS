@@ -7,6 +7,7 @@ import {
   reportDefinition,
   reportFilename,
   toCsv,
+  cellValue,
 } from '../reports'
 
 // CARDS reporting tests.
@@ -223,17 +224,31 @@ describe('discrepancy stays separate from an outstanding quantity', () => {
 
   it('reports a discrepancy quantity only once the PO is flagged', () => {
     const flagged = poRow({ hasDiscrepancy: true, qtyDiscrepancy: 20 })
-    expect(flagged.qtyDiscrepancy).toBe(20)
-    expect(toCsv(cols('discrepancy'), [flagged])).toContain('Yes')
-  })
+    expect(flagged.qtyDiscrepancy).toBe(20);
+    // The flag column lives on the reports that ORIENT a reader. The Discrepancy
+    // Report leads with the record itself instead, so it has no summary flag.
+    expect(toCsv(cols('monitoring'), [flagged])).toContain('Yes');
+    expect(cols('discrepancy').map((c) => c.key)).not.toContain('discrepancyFlag');
+  });
 
-  it('keeps both columns in every quantity-bearing report', () => {
-    for (const type of ['purchase_orders', 'monitoring', 'discrepancy'] as const) {
-      const keys = cols(type).map((c) => c.key)
-      expect(keys).toContain('receivingOutstanding')
-      expect(keys).toContain('qtyDiscrepancy')
+  it('keeps both outstanding columns on the reports that orient a reader', () => {
+    for (const type of ['purchase_orders', 'monitoring'] as const) {
+      const keys = cols(type).map((c) => c.key);
+      expect(keys).toContain('receivingOutstanding');
+      expect(keys).toContain('qtyDiscrepancy');
     }
-  })
+  });
+
+  it('keeps Receiving Outstanding on the Discrepancy Report too', () => {
+    // The balance is still the context for the exception — 49 of 50 received is
+    // only meaningful next to what was outstanding — but the summary flag and
+    // figure are dropped in favour of the discrepancy's own columns, since every
+    // row on this report is a discrepancy by definition and a Yes on all of them
+    // says nothing.
+    const keys = cols('discrepancy').map((c) => c.key);
+    expect(keys).toContain('receivingOutstanding');
+    expect(keys).not.toContain('qtyDiscrepancy');
+  });
 })
 
 // --- Accountability ---------------------------------------------------------
@@ -558,3 +573,70 @@ describe('Dashboard table headers are not hand-rolled', () => {
     }
   })
 })
+
+describe('every Excel export goes through the one shared workbook builder', () => {
+  // The archive download used to hand-roll its own two-sheet workbook with its
+  // own nine headers and no styling, so an archived report disagreed with the
+  // live one while still looking official. Both paths must now render through
+  // src/lib/reportWorkbook.ts, which reads the definitions in src/lib/reports.ts
+  // — that is the only way "an archived export looks like the dashboard export"
+  // stays true as columns are added.
+  const read = async (file: string) => (await import('node:fs')).readFileSync(file, 'utf8')
+
+  it('ReportCards and ArchiveView both call buildReportWorkbook', async () => {
+    for (const file of [
+      'src/components/admin/ReportCards.jsx',
+      'src/components/admin/ArchiveView.jsx',
+    ]) {
+      const src = await read(file)
+      expect(src, `${file} must import the shared builder`).toContain("from '../../lib/reportWorkbook'")
+      expect(src, `${file} must build through it`).toContain('buildReportWorkbook(')
+    }
+  })
+
+  it('ArchiveView declares no report headers of its own', async () => {
+    const src = await read('src/components/admin/ArchiveView.jsx')
+    // The old export hard-coded 'PO date', 'Item Description', 'Qty', 'Status'…
+    // A literal header list in this file means the two exports have drifted.
+    for (const header of ['PO date', 'Item Description', 'Supplier Name', 'Pick-up by', 'Approved Qty']) {
+      expect(src, `ArchiveView must not hard-code the ${header} column`).not.toContain(`'${header}'`)
+    }
+    expect(src, 'ArchiveView must not flatten items into one cell').not.toMatch(/\.join\('; '\)/)
+  })
+
+  it('neither component instantiates ExcelJS directly', async () => {
+    for (const file of [
+      'src/components/admin/ReportCards.jsx',
+      'src/components/admin/ArchiveView.jsx',
+    ]) {
+      const src = await read(file)
+      expect(src, `${file} must not build a workbook itself`).not.toContain('new ExcelJS.Workbook()')
+    }
+  })
+
+  it('the archived download emits the same four reports as the dashboard', async () => {
+    const src = await read('src/components/admin/ArchiveView.jsx')
+    expect(src).toContain('REPORT_ORDER.map((report)')
+    // One row per item, not per order: the old export produced a single row per
+    // purchase order with every line glued into one cell, so per-line balances
+    // were unreportable.
+    const rows = await import('../archiveReportRows')
+    const built = rows.archiveReportRows({
+      warehouseName: 'Bajada', reason: 'reset', clearedAt: '2026-10-10',
+      poData: [{
+        poNumber: 'PO-1', date: '2026-10-01', mrsNo: 'MRS-1', warehouse: 'Bajada',
+        requisitioner: 'Ana', supplier: 'Co', status: 'in_progress', poType: 'active-delivery',
+        approvedBy: null, sourceReqNumber: null, purchaseConfirmedBy: null, purchaseConfirmedAt: null,
+        items: [
+          { id: 'a', itemDescription: 'Cement', qty: 50, unit: 'bags', purchasedQty: 50, receivedQty: 30 },
+          { id: 'b', itemDescription: 'Nails', qty: 20, unit: 'pcs', purchasedQty: 20, receivedQty: 20 },
+        ],
+      }],
+      requestData: [],
+      relatedData: null,
+    })
+    expect(Object.keys(built)).toEqual(REPORT_ORDER)
+    expect(built.purchase_orders).toHaveLength(2)
+  })
+})
+

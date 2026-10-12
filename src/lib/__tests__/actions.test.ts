@@ -44,6 +44,46 @@ type Fixture = {
  * meaningful. A mock that ignored `where` would report every row for every
  * warehouse and quietly pass a broken scope.
  */
+/**
+ * Model PostgreSQL LIKE, so this double behaves like the database and not like
+ * JavaScript.
+ *
+ * Prisma lowers `contains` to `LIKE '%' || $1 || '%'` and passes the pattern
+ * through untouched, so the pattern really is a LIKE pattern: `%` matches any
+ * run, `_` matches any one character, a backslash escapes the next character.
+ * The application escapes them first (escapeLikePattern in actions/procurement.ts)
+ * so they arrive literal.
+ *
+ * The OLD double did a bare JavaScript `includes`, which treats `%` as literal
+ * unconditionally — so it agreed with the expected result whether or not the
+ * application escaped anything. That is how DB-01 stayed hidden: the suite
+ * certified behaviour the database does not have (DB-01). Verified against the
+ * disposable PostgreSQL 16.15 through the real client — unescaped `contains('%')`
+ * matched every row, an escaped percent matched only the row that truly held one.
+ */
+function likeToRegExp(pattern: string): RegExp {
+  const LITERAL = /[.*+?^${}()|[\]\\]/g;
+  let out = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') {
+      const next = pattern[i + 1];
+      if (next === undefined) out += '\\\\';
+      else { out += next.replace(LITERAL, '\\$&'); i++; }
+      continue;
+    }
+    if (ch === '%') { out += '[\\s\\S]*'; continue; }
+    if (ch === '_') { out += '[\\s\\S]'; continue; }
+    out += ch.replace(LITERAL, '\\$&');
+  }
+  return new RegExp(out, 'i');
+}
+
+/** Case-insensitive `contains`, modelling the LIKE Prisma actually emits. */
+function likeContains(value: unknown, pattern: string): boolean {
+  return likeToRegExp(`%${pattern}%`).test(String(value ?? ''));
+}
+
 function matchesWhere(row: any, where: any): boolean {
   if (!where) return true
   if (typeof where.warehouse === 'string' && row.warehouse !== where.warehouse) return false
@@ -61,12 +101,13 @@ function matchesWhere(row: any, where: any): boolean {
         const cond = clause[key]
         if (!cond) continue
         const value = row[key]
-        if (cond.contains !== undefined) return q(value).includes(q(cond.contains))
+        if (cond.contains !== undefined) return likeContains(row[key], cond.contains)
         if (Array.isArray(cond.in)) return cond.in.includes(value)
         if (cond.not === undefined) return value !== cond.not
       }
       if (clause.items?.some?.itemDescription?.contains) {
-        const needle = q(clause.items.some.itemDescription.contains)
+        const itemPattern = clause.items.some.itemDescription.contains
+          return (row.items ?? []).some((i: any) => likeContains(i.itemDescription, itemPattern))
         return (row.items ?? []).some((i: any) => q(i.itemDescription).includes(needle))
       }
       return false
@@ -79,7 +120,7 @@ function matchesWhere(row: any, where: any): boolean {
 const findPOs = async (args: any = {}) => db.fixture.pos.filter((p: any) => matchesWhere(p, args.where))
 
 const db = vi.hoisted(() => ({
-  fixture: { pos: [], requests: [], audit: [] } as any,
+  fixture: { pos: [], requests: [], audit: [], discrepancies: [] } as any,
   // Records which requests a delete actually removed, so a test can assert that a
   // refused delete left the row alone rather than merely not throwing.
   deletedRequests: [] as string[],
@@ -103,6 +144,7 @@ vi.mock('@/lib/prisma', () => ({
       },
     },
     deliveryAuditLog: { findMany: async () => db.fixture.audit },
+    receivingDiscrepancy: { findMany: async (args: any) => findDiscrepancies(args) },
     $transaction: async (fn: any) => fn(mockTx()),
   },
   runTx: async (fn: any) => fn(mockTx()),
@@ -134,7 +176,17 @@ function mockTx() {
     },
     warehouseRequest: { findMany: async (args: any) => findRequests(args) },
     deliveryAuditLog: { findMany: async () => db.fixture.audit },
+    receivingDiscrepancy: { findMany: async (args: any) => findDiscrepancies(args) },
   }
+}
+
+/** Discrepancy rows honour the status filter the report and the scan both use. */
+function findDiscrepancies(args: any = {}) {
+  const w = args?.where ?? {}
+  let out = db.fixture.discrepancies
+  if (w.poNumber?.in) out = out.filter((r: any) => w.poNumber.in.includes(r.poNumber))
+  if (w.status) out = out.filter((r: any) => r.status === w.status)
+  return out
 }
 
 /** A PO carrying every column a report row reads. */
@@ -189,6 +241,7 @@ beforeEach(() => {
   db.fixture.pos = []
   db.fixture.requests = []
   db.fixture.audit = []
+  db.fixture.discrepancies = []
   db.deletedRequests = []
 })
 
@@ -335,6 +388,161 @@ describe('getReportRows', () => {
     expect(flagged.rows[0].poNumber).toBe('PO-FLAG')
   })
 
+  // -------------------------------------------------------------------------
+  // An outstanding balance is work, not an exception. The Discrepancy Report is
+  // only about the rows somebody actually reported a problem on.
+  // -------------------------------------------------------------------------
+  it('U — an unflagged outstanding balance never becomes a discrepancy row', async () => {
+    db.fixture.pos = [po({ poNumber: 'PO-OPEN', items: [poItem('PO-OPEN', 'o', 'Cement', 'bags', 10, 8)] })]
+    const flagged = await (await load()).getReportRows({ report: 'discrepancy' })
+
+    expect(flagged.total).toBe(0)
+    expect(flagged.rows).toEqual([])
+  })
+
+  it('U — includes a line carrying an open discrepancy, and not its siblings', async () => {
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-MIX',
+        items: [poItem('PO-MIX', 'c', 'Cement', 'bags', 10, 10), poItem('PO-MIX', 'n', 'Nails', 'boxes', 10, 8)],
+      }),
+    ]
+    db.fixture.discrepancies = [
+      {
+        id: 'disc-1',
+        poNumber: 'PO-MIX',
+        poItemId: 'n',
+        itemDescription: 'Nails',
+        unit: 'boxes',
+        discrepancyType: 'Short Quantity',
+        remarks: 'Only 80 boxes on the truck.',
+        status: 'open',
+        reportedBy: 'wh1',
+        reportedAt: new Date('2026-10-07T12:00:00Z'),
+        resolvedBy: null,
+        resolvedAt: null,
+        resolution: null,
+      },
+    ]
+
+    const flagged = await (await load()).getReportRows({ report: 'discrepancy' })
+
+    // One row: the nails. The cement arrived in full and is not implicated by
+    // its neighbour having a problem.
+    expect(flagged.total).toBe(1)
+    expect(flagged.rows[0].itemDescription).toBe('Nails')
+    expect(flagged.rows[0].discrepancy.discrepancyType).toBe('Short Quantity')
+    expect(flagged.rows[0].discrepancy.reportedBy).toBe('wh1')
+    expect(flagged.rows[0].discrepancy.statusLabel).toBe('Open')
+  })
+
+  it('sizes a live discrepancy quantity to the flagged LINE, not the whole PO', async () => {
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-MIX',
+        items: [poItem('PO-MIX', 'c', 'Cement', 'bags', 10, 4), poItem('PO-MIX', 'n', 'Nails', 'boxes', 10, 8)],
+      }),
+    ]
+    db.fixture.discrepancies = [
+      {
+        id: 'disc-1',
+        poNumber: 'PO-MIX',
+        poItemId: 'n',
+        itemDescription: 'Nails',
+        unit: 'boxes',
+        discrepancyType: 'Short Quantity',
+        remarks: null,
+        status: 'open',
+        reportedBy: 'wh1',
+        reportedAt: new Date('2026-10-07T12:00:00Z'),
+        resolvedBy: null,
+        resolvedAt: null,
+        resolution: null,
+      },
+    ]
+
+    const rows = (await (await load()).getReportRows({ report: 'monitoring' })).rows
+    const cement = rows.find((r: any) => r.itemDescription === 'Cement')
+    const nails = rows.find((r: any) => r.itemDescription === 'Nails')
+
+    // The cement line is 6 short and the nails 2, but only the flagged line is an
+    // exception — so the cement's shortfall stays ordinary receiving work.
+    expect(cement.receivingOutstanding).toBe(6);
+    expect(cement.qtyDiscrepancy).toBe(0);
+    expect(nails.receivingOutstanding).toBe(2);
+    expect(nails.qtyDiscrepancy).toBe(2);
+  })
+
+  it('keeps an archive-flagged PO on the whole-balance quantity it has always shown', async () => {
+    db.fixture.pos = [po({ poNumber: 'PO-LEG', poType: 'discrepancy', items: [poItem('PO-LEG', 'l', 'Cement', 'bags', 10, 8)] })]
+    const rows = (await (await load()).getReportRows({ report: 'monitoring' })).rows
+
+    // The archive flag predates item-level tracking and is a verdict on the
+    // whole order, so its PO-wide figure is preserved rather than narrowed.
+    expect(rows[0].hasDiscrepancy).toBe(true)
+    expect(rows[0].qtyDiscrepancy).toBe(2)
+  })
+
+  it('includes resolved discrepancies so the report is a history', async () => {
+    db.fixture.pos = [po({ poNumber: 'PO-DONE', items: [poItem('PO-DONE', 'd', 'Nails', 'boxes', 10, 9)] })]
+    db.fixture.discrepancies = [
+      {
+        id: 'disc-1',
+        poNumber: 'PO-DONE',
+        poItemId: 'd',
+        itemDescription: 'Nails',
+        unit: 'boxes',
+        discrepancyType: 'Damaged Item',
+        remarks: '1 box crushed.',
+        status: 'resolved',
+        reportedBy: 'wh1',
+        reportedAt: new Date('2026-10-07T12:00:00Z'),
+        resolvedBy: 'purchaser1',
+        resolvedAt: new Date('2026-10-07T16:00:00Z'),
+        resolution: 'Replacement box delivered on the next run.',
+      },
+    ]
+
+    const flagged = await (await load()).getReportRows({ report: 'discrepancy' })
+
+    expect(flagged.total).toBe(1)
+    expect(flagged.rows[0].discrepancy).toMatchObject({
+      discrepancyType: 'Damaged Item',
+      remarks: '1 box crushed.',
+      status: 'resolved',
+      statusLabel: 'Resolved',
+      reportedBy: 'wh1',
+      resolvedBy: 'purchaser1',
+      resolution: 'Replacement box delivered on the next run.',
+    });
+  })
+
+  it('a PO with no open flag leaves the Discrepancies section once resolved', async () => {
+    db.fixture.pos = [po({ poNumber: 'PO-DONE', items: [poItem('PO-DONE', 'd', 'Nails', 'boxes', 10, 9)] })]
+    db.fixture.discrepancies = [
+      {
+        id: 'disc-1',
+        poNumber: 'PO-DONE',
+        poItemId: 'd',
+        itemDescription: 'Nails',
+        unit: 'boxes',
+        discrepancyType: 'Damaged Item',
+        remarks: null,
+        status: 'resolved',
+        reportedBy: 'wh1',
+        reportedAt: new Date('2026-10-07T12:00:00Z'),
+        resolvedBy: 'purchaser1',
+        resolvedAt: new Date('2026-10-07T16:00:00Z'),
+        resolution: 'Closed.',
+      },
+    ]
+
+    const overview = await (await load()).getDashboardOverview({ preview: 5 })
+    // The active queue counts OPEN work only, so a PO whose flags are all closed
+    // is not in it — even though the report still holds the history.
+    expect(overview.discrepancies.poCount).toBe(0);
+  })
+
   it('carries a purchase outstanding quantity through to the row', async () => {
     db.fixture.pos = [po({ items: [poItem('PO-001', 'i1', 'Cement', 'bags', 6, 0, 10)] })]
     const res = await (await load()).getReportRows({ report: 'purchase_orders' })
@@ -384,6 +592,583 @@ describe('getReportRows', () => {
     actor.current = { id: 'w', username: 'wh1', role: 'Warehouse', warehouse: 'Bajada Warehouse' }
     await expect((await load()).getReportRows({ report: 'monitoring' })).rejects.toThrow(/Unauthorized/i)
     await expect((await load()).getDashboardOverview({})).rejects.toThrow(/Unauthorized/i)
+  })
+})
+
+// PHASE 6 — report search contract.
+//
+// The search box reaches two DIFFERENT implementations inside getReportRows:
+//
+//   PO reports        buildWorkloadWhere() pushes a `where.OR` of
+//                     `contains`/`mode: 'insensitive'` arms on poNumber, mrsNo,
+//                     supplier and items.some.itemDescription, so the DATABASE
+//                     filters before the row scan and the WORKLOAD_SCAN_LIMIT
+//                     applies to matching POs only.
+//   material_requests the rows are built first, then filtered in memory:
+//                     `rows.filter((r) => [reqNumber, mrsNo, itemDescription,
+//                     requestedBy, poNumber, supplier].join(' ').includes(q))`.
+//
+// Both trim, both case-fold, both do substring matching. These tests pin that
+// shared contract, each searchable field, and the one substantive difference: the
+// PO path searches itemDescription through the items relation while the in-memory
+// path searches a single joined row, and the PO path additionally searches
+// `supplier` only (never requestedBy/approvedBy), whereas material_requests has no
+// supplier-relation search and instead searches requestedBy. The overlap fields —
+// reqNumber/mrsNo/itemDescription/poNumber/supplier — are asserted to behave the
+// same through both doors where both carry the value.
+describe('report search — PO reports (database-side where.OR)', () => {
+  const posWithSearchableFields = () => [
+    po({
+      poNumber: 'PO-ALPHA',
+      mrsNo: 'MRS-BRAVO',
+      supplier: 'Cement Masters Inc',
+      items: [poItem('PO-ALPHA', 'i1', 'Structural Rebar', 'pcs', 5, 0)],
+    }),
+    po({
+      poNumber: 'PO-CHARLIE',
+      mrsNo: 'MRS-DELTA',
+      supplier: 'Sand Suppliers Co',
+      items: [poItem('PO-CHARLIE', 'i1', 'Gravel Aggregate', 'm3', 3, 0)],
+    }),
+  ]
+
+  it('returns every row for an empty or whitespace-only query', async () => {
+    db.fixture.pos = posWithSearchableFields()
+    const { getReportRows } = await load()
+    for (const search of ['', '   ', undefined]) {
+      const res = await getReportRows({ report: 'purchase_orders', search })
+      expect(res.total, `search=${JSON.stringify(search)}`).toBe(2)
+    }
+  })
+
+  it('matches a partial PO number, case-insensitively', async () => {
+    db.fixture.pos = posWithSearchableFields()
+    const { getReportRows } = await load()
+    for (const search of ['ALPHA', 'alpha', 'Po-Alph']) {
+      const res = await getReportRows({ report: 'purchase_orders', search })
+      expect(res.total, search).toBe(1)
+      expect(res.rows[0].poNumber).toBe('PO-ALPHA')
+    }
+  })
+
+  it('matches each searchable field: mrsNo, supplier and item description', async () => {
+    db.fixture.pos = posWithSearchableFields()
+    const { getReportRows } = await load()
+
+    const byMrs = await getReportRows({ report: 'purchase_orders', search: 'BRAVO' })
+    expect(byMrs.rows[0].mrsNo).toBe('MRS-BRAVO')
+
+    const bySupplier = await getReportRows({ report: 'purchase_orders', search: 'sand suppliers' })
+    expect(bySupplier.rows[0].supplier).toBe('Sand Suppliers Co')
+
+    const byItem = await getReportRows({ report: 'purchase_orders', search: 'REBAR' })
+    expect(byItem.rows[0].itemDescription).toBe('Structural Rebar')
+  })
+
+  it('matches a PO via ANY of its items and returns that PO\'s whole item set', async () => {
+    // The PO door filters at PO LEVEL (`items: { some: {...} }` selects the
+    // purchase order), and flattenPoItems then expands EVERY item of a matched PO
+    // into its own report row. So a term matching the SECOND line still brings
+    // the first line back, carrying the PO's repeated fields.
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-MULTI',
+        items: [
+          poItem('PO-MULTI', 'i1', 'Cement', 'bags', 1, 0),
+          poItem('PO-MULTI', 'i2', 'Plywood', 'sheets', 1, 0),
+        ],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'plywood' })
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual(['Cement', 'Plywood'])
+    expect(res.rows.every((r: any) => r.poNumber === 'PO-MULTI')).toBe(true)
+  })
+
+  it('returns an empty result for a query that matches nothing', async () => {
+    db.fixture.pos = posWithSearchableFields()
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'nonexistent-zzz' })
+    expect(res.rows).toEqual([])
+    expect(res.total).toBe(0)
+  })
+
+  it('tolerates null supplier and empty items without matching a null query', async () => {
+    db.fixture.pos = [
+      po({ poNumber: 'PO-NOSUP', supplier: null, items: [] }),
+      po({ poNumber: 'PO-TEXT', supplier: 'Real Supplier', items: [poItem('PO-TEXT', 'i1', 'Nails', 'kg', 1, 0)] }),
+    ]
+    const { getReportRows } = await load()
+    // A real term still finds the populated PO and never the null-supplier one.
+    const res = await getReportRows({ report: 'purchase_orders', search: 'nails' })
+    expect(res.total).toBe(1)
+    expect(res.rows[0].poNumber).toBe('PO-TEXT')
+  })
+
+  it('treats SQL pattern characters as literal text, not wildcards', async () => {
+    db.fixture.pos = [
+      po({ poNumber: 'PO-PLAIN', items: [poItem('PO-PLAIN', 'i1', 'Plain Rod', 'pcs', 1, 0)] }),
+      po({ poNumber: 'PO-PCT', items: [poItem('PO-PCT', 'i1', '50% Discount', 'pcs', 1, 0)] }),
+    ]
+    const { getReportRows } = await load()
+// The OLD comment here claimed the double mirrored "how Prisma sends
+      // `contains` as a LIKE with escaped wildcards". That was false, and the
+      // test passed for the WRONG reason: a bare JavaScript `includes` treats '%'
+      // as literal unconditionally, so it agreed with the expected result whether
+      // or not the application escaped anything. Measured against the disposable
+      // PostgreSQL 16.15 through the real client, unescaped `contains('%')` matched
+      // EVERY row. The double now undoes LIKE escaping (unescapeLikePattern) so it
+      // models the database, and escapeLikePattern() is what makes '%' literal here.
+      const res = await getReportRows({ report: 'purchase_orders', search: '%' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-PCT'])
+  })
+
+  it('scopes the search to the caller warehouse when one is given', async () => {
+    db.fixture.pos = [
+      po({ poNumber: 'PO-BAJADA', warehouse: 'Bajada Warehouse', items: [poItem('PO-BAJADA', 'i1', 'Cement', 'bags', 1, 0)] }),
+      po({ poNumber: 'PO-OTHER', warehouse: 'Other Warehouse', items: [poItem('PO-OTHER', 'i1', 'Cement', 'bags', 1, 0)] }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'cement', warehouse: 'Bajada Warehouse' })
+    // Both POs share the search term, but only the scoped warehouse returns.
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-BAJADA'])
+  })
+})
+
+describe('report search — material_requests (in-memory filter)', () => {
+  const requestsWithSearchableFields = () => [
+    req({
+      reqNumber: 'REQ-ALPHA',
+      mrsNo: 'MRS-BRAVO',
+      requestedBy: 'Ana Reyes',
+      items: [{ id: 'ri1', reqNumber: 'REQ-ALPHA', itemDescription: 'Structural Rebar', qty: 5, unit: 'pcs', approvedQty: 5, itemId: null }],
+    }),
+    req({
+      reqNumber: 'REQ-CHARLIE',
+      mrsNo: 'MRS-DELTA',
+      requestedBy: 'Ben Cruz',
+      items: [{ id: 'ri1', reqNumber: 'REQ-CHARLIE', itemDescription: 'Gravel Aggregate', qty: 3, unit: 'm3', approvedQty: 3, itemId: null }],
+    }),
+  ]
+
+  it('returns every row for an empty or whitespace-only query', async () => {
+    db.fixture.requests = requestsWithSearchableFields()
+    const { getReportRows } = await load()
+    for (const search of ['', '   ', undefined]) {
+      const res = await getReportRows({ report: 'material_requests', search })
+      expect(res.total, `search=${JSON.stringify(search)}`).toBe(2)
+    }
+  })
+
+  it('matches a partial request number, case-insensitively', async () => {
+    db.fixture.requests = requestsWithSearchableFields()
+    const { getReportRows } = await load()
+    for (const search of ['ALPHA', 'alpha', 'Req-Alph']) {
+      const res = await getReportRows({ report: 'material_requests', search })
+      expect(res.total, search).toBe(1)
+      expect(res.rows[0].reqNumber).toBe('REQ-ALPHA')
+    }
+  })
+
+  it('matches each searchable field: mrsNo, requestedBy and item description', async () => {
+    db.fixture.requests = requestsWithSearchableFields()
+    const { getReportRows } = await load()
+
+    const byMrs = await getReportRows({ report: 'material_requests', search: 'BRAVO' })
+    expect(byMrs.rows[0].mrsNo).toBe('MRS-BRAVO')
+
+    // requestedBy is searchable on this report but NOT a PO-report field.
+    const byRequester = await getReportRows({ report: 'material_requests', search: 'ben cruz' })
+    expect(byRequester.rows[0].reqNumber).toBe('REQ-CHARLIE')
+
+    const byItem = await getReportRows({ report: 'material_requests', search: 'REBAR' })
+    expect(byItem.rows[0].itemDescription).toBe('Structural Rebar')
+  })
+
+  it('returns an empty result for a query that matches nothing', async () => {
+    db.fixture.requests = requestsWithSearchableFields()
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'nonexistent-zzz' })
+    expect(res.rows).toEqual([])
+    expect(res.total).toBe(0)
+  })
+
+  it('tolerates null poNumber/supplier on a joined row', async () => {
+    // A request with no purchase order yet has poNumber and supplier null; a
+    // search must not match on those and must not throw.
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-NOPO',
+        items: [{ id: 'ri1', reqNumber: 'REQ-NOPO', itemDescription: 'Cement', qty: 1, unit: 'bags', approvedQty: 1, itemId: null }],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'cement' })
+    expect(res.total).toBe(1)
+    expect(res.rows[0].poNumber).toBeNull()
+  })
+
+  it('treats a percent sign as literal text, not a wildcard', async () => {
+    db.fixture.requests = [
+      req({ reqNumber: 'REQ-PLAIN', items: [{ id: 'ri1', reqNumber: 'REQ-PLAIN', itemDescription: 'Plain Rod', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null }] }),
+      req({ reqNumber: 'REQ-PCT', items: [{ id: 'ri1', reqNumber: 'REQ-PCT', itemDescription: '50% Discount', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null }] }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: '%' })
+    expect(res.rows.map((r: any) => r.reqNumber)).toEqual(['REQ-PCT'])
+  })
+})
+
+// PHASE 6 DB-01 — `%` and `_` are LITERAL in report search, on both doors.
+//
+// Prisma lowers `contains` to a SQL LIKE/ILIKE and passes the pattern through
+// untouched, so a metacharacter typed into the search box was a WILDCARD:
+// searching `%` returned every purchase order in the database. The Material
+// Requests door matched in JavaScript, where the same character was literal —
+// so one query, two answers.
+//
+// The fix is escapeLikePattern() in actions/procurement.ts, applied once in
+// buildWorkloadWhere so all four PO arms agree. The Material Requests door needs
+// nothing: `String.includes()` is already literal, which is the contract being
+// matched.
+//
+// These tests assert returned ROWS. The prisma double now undoes LIKE escaping
+// (helpers/prismaDouble.ts unescapeLikePattern), so a test can no longer pass
+// merely because JavaScript happened to agree with the wrong answer.
+describe('DB-01 — `%` and `_` are literal characters, not LIKE wildcards', () => {
+  const PCT_POS = po({ poNumber: 'PO-PCT', items: [poItem('PO-PCT', 'i1', '50% Discount', 'pcs', 1, 0)] })
+  const PCT_NEG = po({ poNumber: 'PO-PLAIN', items: [poItem('PO-PLAIN', 'i1', 'Plain Rod', 'pcs', 1, 0)] })
+  const US_POS = po({ poNumber: 'PO-US', items: [poItem('PO-US', 'i1', 'a_b item', 'pcs', 1, 0)] })
+  const US_NEG = po({ poNumber: 'PO-NOUS', items: [poItem('PO-NOUS', 'i1', 'Plain Rod', 'pcs', 1, 0)] })
+
+  it('1. a literal `%` matches only records that actually contain a percent sign', async () => {
+    db.fixture.pos = [PCT_POS, PCT_NEG]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: '%' })
+    // The decisive assertion: unescaped, '%' would have matched BOTH.
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-PCT'])
+  })
+
+  it('2. a literal `_` matches only records that actually contain an underscore', async () => {
+    db.fixture.pos = [US_POS, US_NEG]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: '_' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-US'])
+  })
+
+  it('3. a mixed term containing both characters behaves literally', async () => {
+    db.fixture.pos = [
+      po({ poNumber: 'PO-MIX', items: [poItem('PO-MIX', 'i1', '50% of a_b', 'pcs', 1, 0)] }),
+      PCT_NEG, US_NEG,
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: '% of a_' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-MIX'])
+  })
+
+  it('4. case-insensitive matching still works alongside the escaping', async () => {
+    db.fixture.pos = [po({ poNumber: 'PO-CI', items: [poItem('PO-CI', 'i1', 'STRONGLY A_B', 'pcs', 1, 0)] })]
+    const { getReportRows } = await load()
+    for (const search of ['a_b', 'A_B', 'strongly a_b']) {
+      const res = await getReportRows({ report: 'purchase_orders', search })
+      expect(res.rows.map((r: any) => r.poNumber), search).toEqual(['PO-CI'])
+    }
+  })
+
+  it('5. an ordinary text query is unaffected by the escaping', async () => {
+    db.fixture.pos = [PCT_POS, PCT_NEG]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'rod' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-PLAIN'])
+  })
+
+  it('6. a non-matching query still returns nothing', async () => {
+    db.fixture.pos = [PCT_POS, PCT_NEG]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'zzz-nothing' })
+    expect(res.rows).toEqual([])
+    expect(res.total).toBe(0)
+  })
+
+  it('7. a PO matched on ONE item still returns every item row of that PO', async () => {
+    // Whole-order matching (P6-02) must survive the escaping.
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-MULTI',
+        items: [
+          poItem('PO-MULTI', 'i1', 'Cement', 'bags', 1, 0),
+          poItem('PO-MULTI', 'i2', '50% Rebar', 'pcs', 1, 0),
+        ],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: '%' })
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual(['Cement', '50% Rebar'])
+  })
+
+  it('8. a request matched on ONE item still returns every item row of that request', async () => {
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-MULTI',
+        items: [
+          { id: 'm1', reqNumber: 'REQ-MULTI', itemDescription: 'Cement', qty: 1, unit: 'bags', approvedQty: 1, itemId: null },
+          { id: 'm2', reqNumber: 'REQ-MULTI', itemDescription: '50% Rebar', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+        ],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: '%' })
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual(['Cement', '50% Rebar'])
+  })
+
+  it('9. joined PO number and supplier still match, including with a metacharacter', async () => {
+    // The supplier / PO-number arms must be escaped identically to itemDescription.
+    db.fixture.pos = [
+      po({ poNumber: 'PO-JOIN', supplier: '50% Off Supplies', items: [poItem('PO-JOIN', 'i1', 'Plain Rod', 'pcs', 1, 0)] }),
+      PCT_NEG,
+    ]
+    const { getReportRows } = await load()
+    const bySupplier = await getReportRows({ report: 'purchase_orders', search: '% off' })
+    expect(bySupplier.rows.map((r: any) => r.poNumber)).toEqual(['PO-JOIN'])
+    const byPoNumber = await getReportRows({ report: 'purchase_orders', search: 'PO-JOIN' })
+    expect(byPoNumber.rows.map((r: any) => r.poNumber)).toEqual(['PO-JOIN'])
+  })
+
+  it('10. warehouse scoping still excludes records outside the permitted warehouse', async () => {
+    db.fixture.pos = [
+      po({ poNumber: 'PO-BAJADA', warehouse: 'Bajada Warehouse', items: [poItem('PO-BAJADA', 'i1', '50% Cement', 'bags', 1, 0)] }),
+      po({ poNumber: 'PO-OTHER', warehouse: 'Other Warehouse', items: [poItem('PO-OTHER', 'i1', '50% Cement', 'bags', 1, 0)] }),
+    ]
+    const { getReportRows } = await load()
+    // Both hold a literal '%', so the metacharacter is NOT what narrowed this.
+    const res = await getReportRows({ report: 'purchase_orders', search: '%', warehouse: 'Bajada Warehouse' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-BAJADA'])
+  })
+
+  it('both doors now agree on the same literal metacharacter query', async () => {
+    db.fixture.pos = [PCT_POS, PCT_NEG]
+    db.fixture.requests = [
+      req({ reqNumber: 'REQ-PCT', items: [{ id: 'r1', reqNumber: 'REQ-PCT', itemDescription: '50% Discount', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null }] }),
+      req({ reqNumber: 'REQ-PLAIN', items: [{ id: 'r2', reqNumber: 'REQ-PLAIN', itemDescription: 'Plain Rod', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null }] }),
+    ]
+    const { getReportRows } = await load()
+    const viaPo = await getReportRows({ report: 'purchase_orders', search: '%' })
+    const viaReq = await getReportRows({ report: 'material_requests', search: '%' })
+    // Each door returns exactly ONE record — the one that really holds a '%'.
+    // Before the fix the PO door returned both (wildcard) and the two disagreed.
+    expect(viaPo.total).toBe(1)
+    expect(viaReq.total).toBe(1)
+  })
+
+  it('a literal backslash in the search term is matched literally too', async () => {
+    // The escape character must escape ITSELF, or a backslash would silently
+    // swallow the character after it.
+    db.fixture.pos = [
+      po({ poNumber: 'PO-BS', items: [poItem('PO-BS', 'i1', 'back\\slash', 'pcs', 1, 0)] }),
+      po({ poNumber: 'PO-NOBS', items: [poItem('PO-NOBS', 'i1', 'backslash', 'pcs', 1, 0)] }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'purchase_orders', search: 'back\\slash' })
+    expect(res.rows.map((r: any) => r.poNumber)).toEqual(['PO-BS'])
+  })
+})
+
+describe('report search — consistency between the two doors', () => {
+  it('returns the same matches for the overlap fields reqNumber/mrsNo/itemDescription', async () => {
+    // The same term, over the same logical records described through each door,
+    // must select the same record. PO-ALPHA/MRS-BRAVO/"Structural Rebar" mirror
+    // REQ-ALPHA/MRS-BRAVO/"Structural Rebar".
+    db.fixture.pos = [
+      po({
+        poNumber: 'ALPHA-REF',
+        mrsNo: 'MRS-BRAVO',
+        items: [poItem('ALPHA-REF', 'i1', 'Structural Rebar', 'pcs', 5, 0)],
+      }),
+    ]
+    db.fixture.requests = [
+      req({
+        reqNumber: 'ALPHA-REF-REQ',
+        mrsNo: 'MRS-BRAVO',
+        items: [{ id: 'ri1', reqNumber: 'ALPHA-REF-REQ', itemDescription: 'Structural Rebar', qty: 5, unit: 'pcs', approvedQty: 5, itemId: null }],
+      }),
+    ]
+    const { getReportRows } = await load()
+
+    const viaPo = await getReportRows({ report: 'purchase_orders', search: 'MRS-BRAVO' })
+    const viaReq = await getReportRows({ report: 'material_requests', search: 'MRS-BRAVO' })
+    expect(viaPo.total).toBe(1)
+    expect(viaReq.total).toBe(1)
+    expect(viaPo.rows[0].mrsNo).toBe(viaReq.rows[0].mrsNo)
+
+    // Same for the shared item-description field, in the same case.
+    const poItemHit = await getReportRows({ report: 'purchase_orders', search: 'structural rebar' })
+    const reqItemHit = await getReportRows({ report: 'material_requests', search: 'structural rebar' })
+    expect(poItemHit.total).toBe(1)
+    expect(reqItemHit.total).toBe(1)
+    expect(poItemHit.rows[0].itemDescription).toBe(reqItemHit.rows[0].itemDescription)
+  })
+
+  it('P6-02 RESOLVED: a request matched by one item returns ALL its items, like the PO door', async () => {
+    // Both doors now answer the same question with the same semantics — WHOLE
+    // ORDER / WHOLE REQUEST. The PO report filters at PO level (`items: { some }`
+    // selects the order) then expands every item of a matched order; the request
+    // report groups its per-line matches by reqNumber and keeps every line of a
+    // matched request. A term on ONE line returns that line AND its siblings on
+    // both doors, so a search result reads consistently across the two reports.
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-MULTI',
+        mrsNo: 'MRS-M',
+        items: [
+          poItem('PO-MULTI', 'i1', 'Cement', 'bags', 1, 0),
+          poItem('PO-MULTI', 'i2', 'Plywood', 'sheets', 1, 0),
+        ],
+      }),
+    ]
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-MULTI',
+        mrsNo: 'MRS-M',
+        items: [
+          { id: 'ri1', reqNumber: 'REQ-MULTI', itemDescription: 'Cement', qty: 1, unit: 'bags', approvedQty: 1, itemId: null },
+          { id: 'ri2', reqNumber: 'REQ-MULTI', itemDescription: 'Plywood', qty: 1, unit: 'sheets', approvedQty: 1, itemId: null },
+        ],
+      }),
+    ]
+    const { getReportRows } = await load()
+
+    // Searching the SECOND line pulls back the FIRST line's sibling, on both doors.
+    const viaPo = await getReportRows({ report: 'purchase_orders', search: 'plywood' })
+    const viaReq = await getReportRows({ report: 'material_requests', search: 'plywood' })
+    expect(viaPo.rows.map((r: any) => r.itemDescription)).toEqual(['Cement', 'Plywood'])
+    expect(viaReq.rows.map((r: any) => r.itemDescription)).toEqual(['Cement', 'Plywood'])
+
+    // The two doors now agree on the result SIZE for the same query.
+    expect(viaReq.total).toBe(viaPo.total)
+  })
+
+  it('a request matched only on its first item still returns every sibling line', async () => {
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-FIRST',
+        mrsNo: 'MRS-F',
+        items: [
+          { id: 'ri1', reqNumber: 'REQ-FIRST', itemDescription: 'Anchor Bolt', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+          { id: 'ri2', reqNumber: 'REQ-FIRST', itemDescription: 'Weld Rod', qty: 2, unit: 'kg', approvedQty: 2, itemId: null },
+          { id: 'ri3', reqNumber: 'REQ-FIRST', itemDescription: 'Safety Goggles', qty: 3, unit: 'pcs', approvedQty: 3, itemId: null },
+        ],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'anchor bolt' })
+    // The match is on line 1; lines 2 and 3 are retained because they belong to
+    // the same matched request.
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual([
+      'Anchor Bolt',
+      'Weld Rod',
+      'Safety Goggles',
+    ])
+    expect(res.total).toBe(3)
+  })
+
+  it('excludes a request whose own fields and every item line fail to match', async () => {
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-MATCH',
+        mrsNo: 'MRS-GOOD',
+        requestedBy: 'Ana Reyes',
+        items: [{ id: 'ri1', reqNumber: 'REQ-MATCH', itemDescription: 'Cement', qty: 1, unit: 'bags', approvedQty: 1, itemId: null }],
+      }),
+      req({
+        reqNumber: 'REQ-NOMATCH',
+        mrsNo: 'MRS-BAD',
+        requestedBy: 'Ben Cruz',
+        items: [{ id: 'ri2', reqNumber: 'REQ-NOMATCH', itemDescription: 'Sand', qty: 1, unit: 'm3', approvedQty: 1, itemId: null }],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'cement' })
+    // Only the matching request, with all of its (here, single) lines.
+    expect(res.rows.map((r: any) => r.reqNumber)).toEqual(['REQ-MATCH'])
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual(['Cement'])
+  })
+
+  it('each matching request retains its OWN lines; unrelated requests are never pulled in', async () => {
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-A',
+        mrsNo: 'MRS-A',
+        items: [
+          { id: 'a1', reqNumber: 'REQ-A', itemDescription: 'Steel Plate', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+          { id: 'a2', reqNumber: 'REQ-A', itemDescription: 'Steel Angle', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+        ],
+      }),
+      req({
+        reqNumber: 'REQ-B',
+        mrsNo: 'MRS-B',
+        items: [
+          { id: 'b1', reqNumber: 'REQ-B', itemDescription: 'Steel Plate', qty: 5, unit: 'pcs', approvedQty: 5, itemId: null },
+          { id: 'b2', reqNumber: 'REQ-B', itemDescription: 'Wood Beam', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+        ],
+      }),
+      req({
+        reqNumber: 'REQ-C',
+        mrsNo: 'MRS-C',
+        items: [{ id: 'c1', reqNumber: 'REQ-C', itemDescription: 'Copper Wire', qty: 1, unit: 'm', approvedQty: 1, itemId: null }],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'steel' })
+
+    // REQ-A and REQ-B both match; each keeps its own lines. REQ-C never matches
+    // and contributes nothing — no cross-request leakage.
+    expect(res.rows.map((r: any) => r.reqNumber)).toEqual(['REQ-A', 'REQ-A', 'REQ-B', 'REQ-B'])
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual([
+      'Steel Plate',
+      'Steel Angle',
+      'Steel Plate',
+      'Wood Beam', // REQ-B's sibling, kept because REQ-B matched
+    ])
+  })
+
+  it('a request matched via its joined PO number keeps every line', async () => {
+    // The searchable haystack includes the request's PO number, a property of the
+    // order rather than any single line. Searching it must select the WHOLE
+    // request, not the lines whose text happens to contain the term.
+    db.fixture.requests = [
+      req({
+        reqNumber: 'REQ-POJOIN',
+        mrsNo: 'MRS-PJ',
+        items: [
+          { id: 'pj1', reqNumber: 'REQ-POJOIN', itemDescription: 'Brick', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+          { id: 'pj2', reqNumber: 'REQ-POJOIN', itemDescription: 'Mortar', qty: 1, unit: 'pcs', approvedQty: 1, itemId: null },
+        ],
+      }),
+    ]
+    db.fixture.pos = [
+      po({
+        poNumber: 'PO-SEARCHME',
+        mrsNo: 'MRS-PJ',
+        sourceReqNumber: 'REQ-POJOIN',
+        items: [poItem('PO-SEARCHME', 'i1', 'Brick', 'pcs', 1, 0)],
+      }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'searchme' })
+    // Matched on the PO number only — 'Brick' and 'Mortar' rows both retained.
+    expect(res.rows.map((r: any) => r.itemDescription)).toEqual(['Brick', 'Mortar'])
+  })
+
+  it('material_requests never reports truncation, because filtering happens after the build', async () => {
+    // The in-memory filter runs AFTER the rows are materialised, so it cannot be
+    // cut by the PO scan limit and must always report truncated: false.
+    db.fixture.requests = [
+      req({ reqNumber: 'REQ-1', items: [{ id: 'ri1', reqNumber: 'REQ-1', itemDescription: 'Cement', qty: 1, unit: 'bags', approvedQty: 1, itemId: null }] }),
+    ]
+    const { getReportRows } = await load()
+    const res = await getReportRows({ report: 'material_requests', search: 'cement' })
+    expect(res.truncated).toBe(false)
+    expect(res.total).toBe(res.rows.length)
   })
 })
 // A request is permanent infrastructure: its line items, its approved quantities

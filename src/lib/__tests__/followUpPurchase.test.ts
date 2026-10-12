@@ -145,6 +145,10 @@ function tx() {
         return { ...args.create };
       },
     },
+    // Empty throughout: this suite is about purchasing, and the receiving path
+    // only reads this table to refuse a duplicate open report. The stub exists so
+    // that read has something to answer.
+    receivingDiscrepancy: { findMany: async () => [] },
     deliveryAuditLog: {
       create: async (args: any) => {
         db.writes.auditCreate?.(args);
@@ -548,6 +552,97 @@ describe('follow-up eligibility is MRS-level', () => {
     expect(created).toHaveLength(1);
   });
 
+  it('REGRESSION (A2): a SECOND follow-up for the same 40 is rejected', async () => {
+    // The audited defect. The follow-up path read `approved - purchased`, which a
+    // raised-but-unpurchased follow-up does not advance, so a second follow-up
+    // claimed the same 40 again: three POs committing 100 + 40 + 40 = 180 against
+    // a 100 approval, with the middle PO holding an allocation of zero and so
+    // never purchasable. PO-002 below is that first follow-up: raised, unbought.
+    db.pos = [po(), po({ poNumber: 'PO-002', items: [
+      { id: 'pi-2', itemDescription: 'Cement', unit: 'bags', qty: 40, purchasedQty: null, receivedQty: null },
+    ] })];
+    db.requests = [request()];
+    const { createFollowUpPO } = await load();
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+
+    // Room is now zero for the whole MRS, so the whole-MRS guard answers first.
+    await expect(createFollowUpPO(followUp({ poNumber: 'PO-003', items: [{ itemDescription: 'Cement', qty: 40 }] }))).rejects.toThrow(
+      /Nothing left to purchase on MRS-001 .* already been claimed by an existing purchase order/,
+    );
+    expect(created).toEqual([]);
+  });
+
+  it('the first follow-up still succeeds from the same starting state', async () => {
+    // Counterpart to the regression above, from an identical starting fixture:
+    // PO-001 has a 100-unit line but bought only 60, so it commits 60 and 40
+    // remain. Legitimate follow-up purchasing is preserved.
+    db.pos = [po()];
+    db.requests = [request()];
+    const { createFollowUpPO } = await load();
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+
+    await createFollowUpPO(followUp({ items: [{ itemDescription: 'Cement', qty: 40 }] }));
+
+    expect(created).toHaveLength(1);
+    expect(created[0].items.create).toEqual([{ itemDescription: 'Cement', qty: 40, unit: 'bags' }]);
+  });
+
+  it('REGRESSION (A2-read): the form seed offers exactly what createFollowUpPO accepts', async () => {
+    // The audited defect, on the READ that seeds the Follow-up Purchase form.
+    //
+    // `getMRSFollowUpContext` measured `approved - purchased`, a basis a
+    // raised-but-unbought PO does not advance. PO-002 below holds 34 units that
+    // were never bought, so it commits 34 on the server while contributing nothing
+    // to `purchasedQty`: the form advertised 52 (approved 70 - purchased 18) and
+    // the guard accepted only 18 (approved 70 - committed 52). The purchaser's
+    // only symptom was the form rejecting its own default quantity on submit.
+    db.pos = [
+      po({ items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 70, purchasedQty: 18, receivedQty: 18 }] }),
+      po({ poNumber: 'PO-002', items: [{ id: 'pi-2', itemDescription: 'Cement', unit: 'bags', qty: 34, purchasedQty: null, receivedQty: null }] }),
+    ];
+    db.requests = [request({ items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 70, approvedQty: 70, rejectedQty: 0 }] })];
+    const { getMRSFollowUpContext, createFollowUpPO } = await load();
+
+    const ctx = await getMRSFollowUpContext({ originalPoNumber: 'PO-001' });
+    expect(ctx.items[0].remaining).toBe(18);
+    expect(ctx.totalRemaining).toBe(18);
+    expect(ctx.blocked).toBe(false);
+
+    // And the seed is not merely self-consistent: it is the figure the guard
+    // measures, so the form's own default quantity is accepted and nothing above
+    // it is.
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+    await createFollowUpPO(followUp({ items: [{ itemDescription: 'Cement', qty: ctx.items[0].remaining }] }));
+    expect(created).toHaveLength(1);
+
+    const over: any[] = [];
+    db.writes.poCreate = (a) => over.push(a.data);
+    await expect(
+      createFollowUpPO(followUp({ poNumber: 'PO-004', items: [{ itemDescription: 'Cement', qty: ctx.items[0].remaining + 1 }] })),
+    ).rejects.toThrow(/cannot exceed the 18 bags still outstanding on MRS-001/);
+    expect(over).toEqual([]);
+  });
+
+  it('blocks the form when a raised-but-unbought PO has already claimed everything', async () => {
+    // Same defect at its limit. The whole requirement is committed (18 bought + 34
+    // reserved by PO-002 = 52 of 70... leaving 18) — so to reach a blocked form the
+    // unbought PO must cover the rest: PO-001 buys 18, PO-002 reserves 52.
+    db.pos = [
+      po({ items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 70, purchasedQty: 18, receivedQty: 18 }] }),
+      po({ poNumber: 'PO-002', items: [{ id: 'pi-2', itemDescription: 'Cement', unit: 'bags', qty: 52, purchasedQty: null, receivedQty: null }] }),
+    ];
+    db.requests = [request({ items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 70, approvedQty: 70, rejectedQty: 0 }] })];
+    const { getMRSFollowUpContext } = await load();
+
+    const ctx = await getMRSFollowUpContext({ originalPoNumber: 'PO-001' });
+    // `approved - purchased` would have said 52 and offered it as purchasable.
+    expect(ctx.totalRemaining).toBe(0);
+    expect(ctx.blocked).toBe(true);
+  });
+
   it('rejects a zero or negative quantity', async () => {
     db.pos = [po()];
     db.requests = [request()];
@@ -664,9 +759,34 @@ describe('follow-up eligibility is MRS-level', () => {
 });
 
 describe('a manually raised PO cannot over-purchase its MRS either', () => {
+  // Phase 3 P3-02: a DIRECT purchase order takes its warehouse from the
+  // authenticated profile, so the actor here carries one. These tests are about
+  // the MRS allowance, not about warehouse policy; the assertions are unchanged.
+  beforeEach(() => {
+    actor.current = { id: 'test', username: 'purchaser1', role: 'Admin', warehouse: 'MAIN' };
+  });
+
+  /**
+   * MRS-001 approved 100, one PO raised for 60 and fully purchased, leaving 40
+   * free for a second PO.
+   *
+   * The existing PO's line qty is 60, not 100. Under the Phase 3 §7 reservation
+   * rule a PO reserves what it COMMITTED to buy, so a PO raised for 60 that has
+   * bought 60 reserves exactly 60 — which is what leaves 40 for the next PO.
+   * (A PO whose line qty still exceeded what it bought would reserve the larger
+   * figure and leave nothing; that is the reservation rule working, not a bug.)
+   */
+  function reservingPo() {
+    return po({
+      items: [
+        { id: 'item-1', poNumber: 'PO-001', itemDescription: 'Cement', unit: 'bags', qty: 60, purchasedQty: 60, receivedQty: 0 },
+      ],
+    });
+  }
+
   it('rejects a new PO beyond the requirement remainder', async () => {
     // MRS-001 approved 100 with 60 already bought, so only 40 may be raised.
-    db.pos = [po()];
+    db.pos = [reservingPo()];
     db.requests = [request()];
     const { createPO } = await loadPos();
     const created: any[] = [];
@@ -686,7 +806,7 @@ describe('a manually raised PO cannot over-purchase its MRS either', () => {
   });
 
   it('allows a new PO within the requirement remainder', async () => {
-    db.pos = [po()];
+    db.pos = [reservingPo()];
     db.requests = [request()];
     const { createPO } = await loadPos();
     const created: any[] = [];
@@ -1018,6 +1138,109 @@ describe('a Follow-up Approval decision raises its own purchase order', () => {
     );
   });
 
+  it('REGRESSION (BR-FAP-05): a raised PO on ANOTHER request does not consume this approval', async () => {
+    // "Already raised" is matched by the PO's own audit entry AND its
+    // sourceReqNumber. The audit-entry half was covered; this covers the
+    // sourceReqNumber half, which previously no test exercised.
+    await approvedState();
+    // PO-FOREIGN raised an approval handoff, but it belongs to REQ-FOREIGN.
+    db.pos.push(
+      po({
+        poNumber: 'PO-FOREIGN',
+        status: 'awaiting_purchase',
+        sourceReqNumber: 'REQ-FOREIGN',
+        createdAt: new Date('2026-10-02'),
+        items: [{ id: 'pi-F', itemDescription: 'Cement', unit: 'bags', qty: 20, purchasedQty: null, receivedQty: 0 }],
+      }),
+    );
+    db.audit.push({
+      id: 'au-foreign',
+      deliveryId: null,
+      poNumber: 'PO-FOREIGN',
+      action: 'follow_up_approval_po_raised',
+      detail: '',
+      actor: 'purchaser1',
+      createdAt: new Date('2026-10-02'),
+    });
+    const { createPOFromApprovedRequest } = await loadPos();
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+
+    // The approval released 20. PO-FOREIGN's 20 belongs to another request, so
+    // this one may still claim its own 20.
+    await createPOFromApprovedRequest(raise());
+
+    expect(created).toHaveLength(1);
+    expect(created[0].items.create).toEqual([{ itemDescription: 'Cement', qty: 20, unit: 'bags' }]);
+  });
+
+  it('REGRESSION (BR-FAP-05): a raised PO on THIS request does consume the approval', async () => {
+    await approvedState();
+    db.pos.push(
+      po({
+        poNumber: 'PO-MINE',
+        status: 'awaiting_purchase',
+        sourceReqNumber: 'REQ-001',
+        createdAt: new Date('2026-10-02'),
+        items: [{ id: 'pi-M', itemDescription: 'Cement', unit: 'bags', qty: 20, purchasedQty: null, receivedQty: 0 }],
+      }),
+    );
+    db.audit.push({
+      id: 'au-mine',
+      deliveryId: null,
+      poNumber: 'PO-MINE',
+      action: 'follow_up_approval_po_raised',
+      detail: '',
+      actor: 'purchaser1',
+      createdAt: new Date('2026-10-02'),
+    });
+    const { createPOFromApprovedRequest } = await loadPos();
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+
+    // Same audit entry, same quantity, but this one IS on REQ-001 — so the whole
+    // 20 is already raised and nothing is left.
+    await expect(createPOFromApprovedRequest(raise())).rejects.toThrow(
+      /already has a purchase order covering it/,
+    );
+    expect(created).toEqual([]);
+  });
+
+  it('REGRESSION (BR-FAP-06): the PROCUREMENT ceiling binds when the approval still has room', async () => {
+    // The two ceilings are independent, so the binding one must be whichever is
+    // smaller. Every existing case had the APPROVAL arm binding, so removing the
+    // procurement ceiling entirely would not have failed a test.
+    //
+    // After the approval step the requirement stands at 80 approved, and 75 of
+    // them are already bought -> only 5 are left to buy, while the approval
+    // released 20. The smaller ceiling is the procurement one, so the PO may
+    // claim 5 and not the 20 its approval would otherwise allow.
+    db.pos = [
+      po({
+        items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 75, purchasedQty: 75, receivedQty: 30 }],
+      }),
+    ];
+    db.requests = [
+      request({
+        status: 'Partially Approved',
+        requisitioner: 'Site A',
+        requestedBy: 'Warehouse',
+        warehouse: 'MAIN',
+        items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 100, approvedQty: 60, rejectedQty: 0 }],
+      }),
+    ];
+    const { approveRemaining } = await loadRequests();
+    await approveRemaining({ reqNumber: 'REQ-001', items: [{ id: 'ri-1', additionalApproval: 20 }] });
+    const { createPOFromApprovedRequest } = await loadPos();
+    const created: any[] = [];
+    db.writes.poCreate = (a) => created.push(a.data);
+
+    await expect(createPOFromApprovedRequest(raise({ items: [{ id: 'ri-1', qty: 20 }] }))).rejects.toThrow(
+      /cannot exceed the 5 bags/,
+    );
+    expect(created).toEqual([]);
+  });
+
   it('leaves a cancelled PO out of the raised-quantity count', async () => {
     // PO-002 was raised for the approval and then cancelled. It is no longer a
     // claim on the requirement, so the approval may be raised again.
@@ -1084,5 +1307,167 @@ describe('a Follow-up Approval decision raises its own purchase order', () => {
     expect(new Set(db.pos.map((p) => p.mrsNo))).toEqual(new Set(['MRS-001']));
     // No second request and no second MRS: the original stays the parent.
     expect(db.requests).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Approved -> Purchased -> Received chain, as the SERVER enforces it.
+//
+// The allocation fix makes a PO's approved share never fall below what it has
+// already bought, so the tracker's "Purchased > Approved" was a derived-share
+// symptom, not bad data. These tests pin the two halves of the answer: the
+// guards that keep a new purchase inside the chain, and the tracker that
+// reports whatever the server computed without manufacturing anything.
+// ---------------------------------------------------------------------------
+describe('Test A-E — the Approved -> Purchased -> Received chain', () => {
+  beforeEach(() => {
+    db.trackCreated = false;
+  });
+
+  /**
+   * A PO responsible for 40 units of an 80-unit requirement, with nothing bought
+   * on it yet — so its allocated share is 40 and the FIRST purchase is still
+   * available. savePurchase is first-purchase-only, so a PO that already holds a
+   * purchase would be refused before the cap was ever reached.
+   */
+  function unpurchasedState() {
+    db.pos = [
+      po({
+        status: 'awaiting_purchase',
+        supplier: null,
+        items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 40, purchasedQty: null, receivedQty: 0 }],
+      }),
+    ];
+    db.requests = [request({ items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 80, approvedQty: 80, rejectedQty: 0 }] })];
+  }
+
+  /** The same PO after buying its full 40, with 30 of them arrived. */
+  function purchasedState() {
+    db.pos = [
+      po({
+        items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 40, purchasedQty: 40, receivedQty: 30 }],
+      }),
+    ];
+    db.requests = [request({ items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 80, approvedQty: 80, rejectedQty: 0 }] })];
+  }
+
+  const buy = (qty: number) => ({
+    poNumber: 'PO-001',
+    items: [{ poItemId: 'pi-1', purchasedQty: qty }],
+    supplier: 'Supplier A',
+  });
+
+  it('Test A — refuses a purchase above the PO\'s allocated approved share', async () => {
+    unpurchasedState();
+    const { savePurchase } = await load();
+    let wrote = false;
+    db.writes.itemUpdate = () => { wrote = true; };
+
+    // Allocated share 40. 41 is one over.
+    await expect(savePurchase(buy(41))).rejects.toThrow(/cannot exceed the approved quantity of 40/);
+
+    expect(wrote).toBe(false);
+    expect(db.pos[0].items[0].purchasedQty).toBeNull();
+  });
+
+  it('Test B — accepts a purchase exactly equal to the allocated share', async () => {
+    unpurchasedState();
+    const { savePurchase } = await load();
+
+    await savePurchase(buy(40));
+
+    expect(db.pos[0].items[0].purchasedQty).toBe(40);
+  });
+
+  it('Test C — refuses receiving above the purchased quantity', async () => {
+    purchasedState();
+    // Receiving belongs to the warehouse, so the actor has to be one.
+    actor.current = { id: 'w1', username: 'wh1', role: 'Warehouse', warehouse: 'MAIN' };
+    const { recordReceiving } = await load();
+    let wrote = false;
+    db.writes.itemUpdate = () => { wrote = true; };
+
+    // Purchased 40, so 41 received is impossible.
+    await expect(
+      recordReceiving({ poNumber: 'PO-001', items: [{ poItemId: 'pi-1', receivedQty: 41 }] }),
+    ).rejects.toThrow(/cannot exceed the purchased quantity of 40/);
+
+    expect(wrote).toBe(false);
+    expect(db.pos[0].items[0].receivedQty).toBe(30);
+  });
+
+  it('Test D — the tracker reports the chain without manufacturing a quantity', async () => {
+    // Approved 40, purchased 40, received 30. The 10 difference is the
+    // warehouse's receiving work, and it must come out of the server's own
+    // arithmetic rather than being computed in the view.
+    purchasedState();
+    const { getPOTracker } = await load();
+
+    const t = await getPOTracker('PO-001');
+
+    expect(t.items[0].approvedQty).toBe(40);
+    expect(t.items[0].purchasedQty).toBe(40);
+    expect(t.items[0].receivedQty).toBe(30);
+    expect(t.items[0].receivingOutstanding).toBe(10);
+    expect(t.items[0].procurementOutstanding).toBe(0);
+    expect(t.totals.receivingOutstanding).toBe(10);
+    expect(t.totals.procurementOutstanding).toBe(0);
+  });
+
+  it('Test E — two POs of 40 each coexist under an MRS approved for 80, and neither can exceed 40', async () => {
+    // PO-001 and PO-002 each responsible for 40 of one 80-unit requirement.
+    db.pos = [
+      po({
+        items: [{ id: 'pi-1', itemDescription: 'Cement', unit: 'bags', qty: 40, purchasedQty: 40, receivedQty: 40 }],
+      }),
+      po({
+        poNumber: 'PO-002',
+        status: 'awaiting_purchase',
+        supplier: null,
+        createdAt: new Date('2026-10-02T10:00:00Z'),
+        items: [{ id: 'pi-2', itemDescription: 'Cement', unit: 'bags', qty: 40, purchasedQty: null, receivedQty: 0 }],
+      }),
+    ];
+    db.requests = [request({ items: [{ id: 'ri-1', itemDescription: 'Cement', unit: 'bags', qty: 80, approvedQty: 80, rejectedQty: 0 }] })];
+
+    const { getPOTracker } = await load();
+
+    // Each PO's own share is 40, and the requirement is 80 across both.
+    expect((await getPOTracker('PO-001')).items[0].approvedQty).toBe(40);
+    expect((await getPOTracker('PO-002')).items[0].approvedQty).toBe(40);
+    // Both shares come out of one 80-unit requirement, and neither exceeds it.
+    expect((await getPOTracker('PO-001')).items[0].approvedQty
+         + (await getPOTracker('PO-002')).items[0].approvedQty).toBe(80);
+
+    // 41 is the over-claim PO-002's own 40-unit share must refuse. (PO-001 is
+    // already settled, so it is first-purchase-only regardless.)
+    const { savePurchase } = await load();
+    await expect(
+      savePurchase({ poNumber: 'PO-002', items: [{ poItemId: 'pi-2', purchasedQty: 41 }], supplier: 'Supplier B' }),
+    ).rejects.toThrow(/cannot exceed the approved quantity of 40/);
+
+    // The refusal reached the guard, not the write.
+    expect(db.pos[0].items[0].purchasedQty).toBe(40);
+    expect(db.pos[1].items[0].purchasedQty).toBeNull();
+
+    // Buying exactly its own share is the boundary case and is allowed.
+    await savePurchase({
+      poNumber: 'PO-002',
+      items: [{ poItemId: 'pi-2', purchasedQty: 40 }],
+      supplier: 'Supplier B',
+    });
+    expect(db.pos[1].items[0].purchasedQty).toBe(40);
+
+    // Now the requirement is genuinely bought out — 80 approved, 80 purchased —
+    // so a third PO for the same MRS has nothing left to ask for.
+    const { createFollowUpPO } = await load();
+    await expect(
+      createFollowUpPO({
+        originalPoNumber: 'PO-001',
+        poNumber: 'PO-003',
+        date: '2026-10-07',
+        items: [{ itemDescription: 'Cement', qty: 1 }],
+      }),
+    ).rejects.toThrow(/Nothing left to purchase on MRS-001/);
   });
 });

@@ -7,7 +7,7 @@ CARWILL Construction's internal system for warehouse material requests, purchase
 ## Features
 
 - **Role-based access** — Superadmin, Purchaser (Admin), Warehouse
-- **Requests** — warehouses file material requests; purchasers approve fully or partially; partial approvals leave a balance the warehouse can follow up as a separate request/PO
+- **Requests** — warehouses file material requests; purchasers approve fully or partially; a partially approved request's remaining balance is settled by the purchaser via Follow-up Approval on that same request
 - **Purchase Orders** — created from approved requests or manually; active-delivery and discrepancy tracking with warehouse monitoring fields
 - **Dashboard & History** — stat cards, filtering, Excel report generation
 - **Infinite scroll** — every table loads 10 rows at a time server-side (Prisma `skip/take` + `count`), with skeleton loading

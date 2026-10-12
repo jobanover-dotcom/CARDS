@@ -6,9 +6,8 @@ import CreateRequestModal from './CreateRequestModal';
 import TableSkeleton from '../ui/TableSkeleton';
 import TableScrollSentinel from '../ui/TableScrollSentinel';
 import {
-  actionDisabled,
-  actionPurchase,
-  stripeAt,
+    actionDisabled,
+    stripeAt,
   tableEl,
   tableScroller,
   tableShell,
@@ -37,7 +36,6 @@ const NUMERIC_COLUMNS = ['Qty', 'Approved', 'Balance'];
 function RequestsView() {
   const { requestVersion } = useWarehouseData();
   const [newRequestModal, setNewRequestModal] = useState(false);
-  const [followUpReq, setFollowUpReq] = useState(null);
   const [followUpMap, setFollowUpMap] = useState({});
   // Has the requirement behind each request actually been bought and received?
   // One material request can carry several purchase orders, so the request row on
@@ -105,11 +103,13 @@ function RequestsView() {
                       const itemSummary = items.length ? `${items[0].itemDescription}${items.length > 1 ? ` +${items.length - 1} more` : ''}` : '—';
                       const followUps = followUpMap[req.reqNumber] || [];
                       const blocking = followUps.find((f) => f.status !== 'Rejected') || null;
-                      const lastRejected = !blocking && followUps.length > 0 ? followUps[0] : null;
-                      // Gated on the outstanding balance, not the status string. A closed request
-                      // (remainder rejected) reports zero balance here, so the button
-                      // disappears without needing to know about "Approval Closed".
-                      const canFileFollowUp = req.status === REQUEST_STATUS.PARTIALLY_APPROVED.value && balance > 0 && !blocking;
+                      // A partially-approved request whose remainder nobody has
+                      // decided is now solely the PURCHASER's to close, via
+                      // Follow-up Approval on this same request. The warehouse
+                      // states the balance and names who owes the decision; it no
+                      // longer files a parallel request to chase it.
+                      const awaitingPurchaser =
+                        req.status === REQUEST_STATUS.PARTIALLY_APPROVED.value && balance > 0;
                       // Procurement progress for THIS request's requirement, summed
                       // across every purchase order raised against it.
                       const progress = mrsProgress[req.mrsNo] ?? null;
@@ -168,13 +168,10 @@ function RequestsView() {
                             )}
                           </td>
                           <td className="p-4 whitespace-nowrap">
-                            {canFileFollowUp && (
-                              <button
-                                onClick={() => setFollowUpReq(req)}
-                                className={actionPurchase}
-                              >
-                                File Follow-Up
-                              </button>
+                            {awaitingPurchaser && (
+                              <span className={actionDisabled} title="The remaining balance is decided by the purchaser via Follow-up Approval">
+                                Awaiting purchaser decision
+                              </span>
                             )}
                             {/* A follow-up that already exists is shown disabled
                                 rather than hidden, so a missing button never
@@ -182,13 +179,10 @@ function RequestsView() {
                             {blocking && (
                               <span
                                 className={actionDisabled}
-                                title={blocking.status === 'Pending' ? 'Awaiting purchaser decision — refiling is blocked until decided' : 'Shortfall already covered by this follow-up'}
+                                title={blocking.status === 'Pending' ? 'Awaiting purchaser decision on this follow-up request' : 'Shortfall already covered by this follow-up'}
                               >
                                 Follow-up {blocking.status === 'Pending' ? 'pending' : 'approved'}: {blocking.mrsNo}
                               </span>
-                            )}
-                            {lastRejected && (
-                              <div className="mt-1 text-[10px] text-[#999]">Last follow-up {lastRejected.mrsNo} rejected — you may refile</div>
                             )}
                           </td>
                         </tr>
@@ -210,10 +204,6 @@ function RequestsView() {
 
       {newRequestModal && (
         <CreateRequestModal onClose={() => setNewRequestModal(false)} />
-      )}
-
-      {followUpReq && (
-        <CreateRequestModal followUp={followUpReq} onClose={() => setFollowUpReq(null)} />
       )}
     </div>
   );

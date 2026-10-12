@@ -355,8 +355,13 @@ describe('action responsibility', () => {
     const src = await import('node:fs').then((fs) =>
       fs.readFileSync('actions/requests.ts', 'utf8'),
     );
-    const branch = src.slice(src.indexOf('if (rest.followUpOfPoNumber)'));
+    // The branch is now keyed on the parsed payload rather than a destructured
+    // `rest`, and its purchaser-only gate is asserted both at the entry point
+    // and re-asserted inside the transaction.
+    const branch = src.slice(src.indexOf('if (parsed.followUpOfPoNumber)'));
     expect(branch).toMatch(/user\.role !== 'Admin' && user\.role !== 'Superadmin'/);
+    // …and it is reached only for a PO follow-up, which the entry gate selects.
+    expect(src).toMatch(/if \(isPoFollowUp\) \{/);
   });
 });
 
@@ -527,6 +532,27 @@ describe('PO bucket classification', () => {
 
   it('a PO with nothing approved is not a completion', () => {
     expect(bucketOf(chains([0, 0, 0]))).not.toBe('completed');
+  });
+
+  it('O — a PO still one unit short returns to In Progress once the flag clears', () => {
+    // The flag took it to Discrepancies. With the flag resolved, the quantities
+    // decide again — and one unit outstanding is ordinary work, not a completion.
+    expect(bucketOf(chains([50, 50, 49]), true)).toBe('discrepancy');
+    expect(bucketOf(chains([50, 50, 49]), false)).toBe('in_progress');
+  });
+
+  it('P — a PO may complete after its flag clears, but only on its own quantities', () => {
+    // 50 approved, 50 bought, 50 counted, flag resolved: every unit in, so it is
+    // a clean completion. Nothing about resolving forced this.
+    expect(bucketOf(chains([50, 50, 50]), false)).toBe('completed');
+    // 49 of 50 is still not a completion, whatever the flag did.
+    expect(bucketOf(chains([50, 50, 49]), false)).not.toBe('completed');
+  });
+
+  it('the flag never changes a quantity-derived stage', () => {
+    // The section moves; the line's own progress does not. A discrepancy is an
+    // exception on top of the workflow, not a replacement for it.
+    expect(stageOf(chains([50, 50, 49]))).toBe('awaiting_receiving');
   });
 });
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The receiving form asks "what arrived since you last recorded it?", not "what
@@ -140,6 +140,41 @@ describe('the input asks for the arrival, not the total', () => {
     await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
     // A blank means "nothing more", not "zero the delivery".
     expect(recordReceiving.mock.calls[0][0].items).toEqual([{ poItemId: 'pi-1', receivedQty: 30 }]);
+  });
+
+  it('submits only the lines it offers for receiving', async () => {
+    // A line that is approved but never purchased is not receivable, so it is
+    // never rendered. It must not be submitted either: the server refuses the
+    // whole save when any submitted line has no purchased quantity, which would
+    // discard the valid quantities on the lines that are receivable.
+    getPOTracker.mockResolvedValue(
+      tracker({
+        items: [
+          tracker().items[0],
+          {
+            ...tracker().items[0],
+            poItemId: 'pi-2',
+            itemDescription: 'Nails',
+            unit: 'boxes',
+            approvedQty: 50,
+            purchasedQty: 0,
+            receivedQty: 0,
+            receivingOutstanding: 0,
+          },
+        ],
+      }),
+    );
+    await renderForm();
+
+    expect(screen.queryByLabelText(/Quantity arrived now for Nails/i)).toBeNull();
+
+    fireEvent.change(arrivalInput(), { target: { value: '10' } });
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Receiving/ }));
+
+    await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
+    // Nails is absent entirely rather than sent as a zero — that alone used to
+    // fail the save and roll the Cement quantities back with it.
+    expect(recordReceiving.mock.calls[0][0].items).toEqual([{ poItemId: 'pi-1', receivedQty: 40 }]);
   });
 
   it('cannot be typed beyond the outstanding balance', async () => {
@@ -344,5 +379,204 @@ describe('correcting the latest event', () => {
 
     expect(editLatestReceiving).not.toHaveBeenCalled();
     expect(screen.queryByLabelText(/Corrected received total/i)).toBeNull();
+  });
+});
+// ---------------------------------------------------------------------------
+// Discrepancy reporting, from inside the receiving form.
+//
+// The warehouse reports here rather than on a page of its own, because the check
+// and the count are the same physical act: you open the box, you find out what
+// arrived, and whatever you find is either "the rest is still coming" or
+// "something is wrong". Splitting those into two screens would mean counting a
+// delivery twice.
+//
+// The form stages a report rather than submitting it, and Confirm Receiving is
+// still the single write. That matters because it is what stops a delivery from
+// being committed while the checker has no way to record what was wrong with it.
+// ---------------------------------------------------------------------------
+describe('a discrepancy is reported from the receiving form', () => {
+  /** The same single line, plus a second one so item-level attribution is real. */
+  function twoLineTracker(over: Record<string, unknown> = {}) {
+    return tracker({
+      items: [
+        {
+          poItemId: 'pi-1',
+          itemDescription: 'Cement',
+          unit: 'bags',
+          requestedQty: 50,
+          approvedQty: 50,
+          purchasedQty: 50,
+          receivedQty: 40,
+          procurementOutstanding: 0,
+          receivingOutstanding: 10,
+          complete: false,
+          followUpRequired: false,
+        },
+        {
+          poItemId: 'pi-2',
+          itemDescription: 'Nails',
+          unit: 'boxes',
+          requestedQty: 50,
+          approvedQty: 50,
+          purchasedQty: 50,
+          receivedQty: 40,
+          procurementOutstanding: 0,
+          receivingOutstanding: 10,
+          complete: false,
+          followUpRequired: false,
+        },
+      ],
+      ...over,
+    });
+  }
+
+  const nailsArrival = () =>
+    screen.getByLabelText(/Quantity arrived now for Nails/i) as HTMLInputElement;
+
+  it('offers the action on every receivable line, next to that line', async () => {
+    getPOTracker.mockResolvedValue(twoLineTracker());
+    await renderForm();
+
+    expect(screen.getByLabelText('Report discrepancy for Cement')).toBeTruthy();
+    expect(screen.getByLabelText('Report discrepancy for Nails')).toBeTruthy();
+  });
+
+  it('A — an ordinary short receipt submits no discrepancy at all', async () => {
+    getPOTracker.mockResolvedValue(twoLineTracker());
+    await renderForm();
+
+    // Nine of ten arrived, nothing reported. The form must not send a
+    // `discrepancy` key for it, because a short delivery is receiving
+    // outstanding and not an exception.
+    fireEvent.change(nailsArrival(), { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Receiving/i }));
+
+    await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
+    const payload = recordReceiving.mock.calls[0][0];
+    expect(payload.items.find((i: any) => i.poItemId === 'pi-2')).toEqual({
+      poItemId: 'pi-2',
+      receivedQty: 49,
+    });
+    expect(JSON.stringify(payload)).not.toContain('discrepancy');
+  });
+
+  it('stages the report and sends it with the quantities in one submit', async () => {
+    getPOTracker.mockResolvedValue(twoLineTracker());
+    await renderForm();
+
+    fireEvent.click(screen.getByLabelText('Report discrepancy for Nails'));
+    const modal = await waitFor(() => {
+      const m = screen.getByTestId('discrepancy-modal');
+      expect(within(m).getByLabelText(/Discrepancy Type/i)).toBeTruthy();
+      return m;
+    });
+
+    fireEvent.change(within(modal).getByLabelText(/Discrepancy Type/i), {
+      target: { value: 'Damaged Item' },
+    });
+    fireEvent.change(within(modal).getByLabelText(/Remarks/i), {
+      target: { value: '1 box was crushed on arrival.' },
+    });
+    fireEvent.click(within(modal).getByRole('button', { name: 'Report Discrepancy' }));
+
+    // Staged, not saved: the modal closing must not have called the server.
+    expect(recordReceiving).not.toHaveBeenCalled();
+    // And the form says so, so the checker is not left guessing.
+    expect(screen.getByText(/will be recorded when you confirm receiving/i)).toBeTruthy();
+
+    // Nine acceptable boxes: 40 already recorded plus 9.
+    fireEvent.change(nailsArrival(), { target: { value: '9' } });
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Receiving/i }));
+
+    await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
+    const payload = recordReceiving.mock.calls[0][0];
+    expect(payload.items.find((i: any) => i.poItemId === 'pi-2')).toEqual({
+      poItemId: 'pi-2',
+      receivedQty: 49,
+      discrepancy: { type: 'Damaged Item', remarks: '1 box was crushed on arrival.' },
+    });
+    // The untouched sibling carries no discrepancy key.
+    expect(payload.items.find((i: any) => i.poItemId === 'pi-1')).not.toHaveProperty('discrepancy');
+  });
+
+  it('lets the staged report be edited before submitting', async () => {
+    getPOTracker.mockResolvedValue(twoLineTracker());
+    await renderForm();
+
+    fireEvent.click(screen.getByLabelText('Report discrepancy for Nails'));
+    let modal = await waitFor(() => screen.getByTestId('discrepancy-modal'));
+    fireEvent.change(within(modal).getByLabelText(/Discrepancy Type/i), { target: { value: 'Damaged Item' } });
+    fireEvent.click(within(modal).getByRole('button', { name: 'Report Discrepancy' }));
+
+    // The line now offers to amend what was staged.
+    fireEvent.click(screen.getByLabelText('Edit discrepancy for Nails'));
+    modal = await waitFor(() => screen.getByTestId('discrepancy-modal'));
+    fireEvent.change(within(modal).getByLabelText(/Discrepancy Type/i), { target: { value: 'Wrong Specification' } });
+    fireEvent.click(within(modal).getByRole('button', { name: 'Report Discrepancy' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Receiving/i }));
+    await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
+    const payload = recordReceiving.mock.calls[0][0];
+    expect(payload.items.find((i: any) => i.poItemId === 'pi-2').discrepancy.type).toBe(
+      'Wrong Specification',
+    );
+  });
+
+  it('shows a report already on file and offers no way to remove it', async () => {
+    getPOTracker.mockResolvedValue(
+      twoLineTracker({
+        discrepancies: [
+          {
+            id: 'disc-1',
+            poNumber: 'PO-001',
+            poItemId: 'pi-2',
+            itemDescription: 'Nails',
+            unit: 'boxes',
+            discrepancyType: 'Short Quantity',
+            remarks: 'Only 40 boxes on the truck.',
+            status: 'open',
+            statusLabel: 'Open',
+            reportedBy: 'wh1',
+            reportedAt: '2026-10-07T12:00:00.000Z',
+            resolvedBy: null,
+            resolvedAt: null,
+            resolution: null,
+          },
+        ],
+      }),
+    );
+    await renderForm();
+
+    // The checker can see what they reported and that it is still open.
+    expect(screen.getByText(/Discrepancy:/)).toBeTruthy();
+    expect(screen.getByText(/Short Quantity/)).toBeTruthy();
+    expect(screen.getByText(/reported by wh1/)).toBeTruthy();
+
+    // And there is no action on that line: the warehouse raised it and the
+    // purchaser closes it. No unflag, no delete — not on this line or any other.
+    expect(screen.queryByLabelText('Report discrepancy for Nails')).toBeNull();
+    expect(screen.queryByText(/Unflag/i)).toBeNull();
+    expect(screen.queryByText(/Remove/i)).toBeNull();
+    expect(screen.queryByText(/Delete/i)).toBeNull();
+    // The other line is unaffected.
+    expect(screen.getByLabelText('Report discrepancy for Cement')).toBeTruthy();
+  });
+
+  it('cancelling the report modal stages nothing', async () => {
+    getPOTracker.mockResolvedValue(twoLineTracker());
+    await renderForm();
+
+    fireEvent.click(screen.getByLabelText('Report discrepancy for Nails'));
+    const modal = await waitFor(() => screen.getByTestId('discrepancy-modal'));
+    fireEvent.change(within(modal).getByLabelText(/Discrepancy Type/i), { target: { value: 'Damaged Item' } });
+    // Scoped to the modal: the receiving form's own footer has a Cancel too, and
+    // that one would discard the whole form rather than just the report.
+    fireEvent.click(within(modal).getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByText(/will be recorded when you confirm receiving/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Receiving/i }));
+    await waitFor(() => expect(recordReceiving).toHaveBeenCalled());
+    expect(JSON.stringify(recordReceiving.mock.calls[0][0])).not.toContain('discrepancy');
   });
 });

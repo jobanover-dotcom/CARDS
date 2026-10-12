@@ -53,6 +53,7 @@ function poRow(over: Record<string, unknown> = {}) {
     date: '2026-10-01',
     mrsNo: 'MRS-001',
     warehouse: 'WH1',
+    requisitioner: 'Site A',
     supplier: 'Supplier A',
     status: 'in_progress',
     statusLabel: 'In Progress',
@@ -128,6 +129,32 @@ function workload(over: Record<string, unknown> = {}) {
     receivingDue: [poRow(), SECOND_PO],
     inProgress: [],
     completed: [],
+    // The per-requirement roll-up, priced by the same server read as the rows.
+    // MRS-001's approved is deliberately 150 against PO-001's own 120: approved
+    // belongs to the requirement and is counted ONCE across the MRS, so a
+    // purchase order only ever carries its allocated share of it.
+    mrsAggregates: {
+      'MRS-001': {
+        requested: 150,
+        approved: 150,
+        rejected: 30,
+        purchased: 80,
+        received: 25,
+        procurementOutstanding: 70,
+        receivingOutstanding: 55,
+        sourceReqNumber: 'REQ-001',
+      },
+      'MRS-002': {
+        requested: 10,
+        approved: 10,
+        rejected: 0,
+        purchased: 10,
+        received: 0,
+        procurementOutstanding: 0,
+        receivingOutstanding: 10,
+        sourceReqNumber: null,
+      },
+    },
     ...over,
   };
 }
@@ -141,6 +168,17 @@ async function renderView() {
 /** Only the clickable purchase-order rows. */
 function poRows(container: HTMLElement) {
   return Array.from(container.querySelectorAll('tbody > tr[aria-expanded]'));
+}
+
+/**
+ * The material-request bands.
+ *
+ * A band is a plain row with no `aria-expanded`, because it is a heading and not
+ * something to expand — which is what keeps it from being counted as a purchase
+ * order by `poRows()` above.
+ */
+function bandRows(container: HTMLElement) {
+  return Array.from(container.querySelectorAll('tbody > tr[data-testid="mrs-band"]'));
 }
 
 /**
@@ -314,6 +352,164 @@ describe('the same purchase-order table serves the other sections', () => {
     expect(screen.queryByRole('button', { name: 'Receive' })).toBeNull();
   });
 
+  // View and Track used to open the SAME modal, but only Track loaded it: View
+  // set the modal's PO number without fetching, so the modal sat on "Loading…"
+  // forever — or, after any earlier Track, showed the PREVIOUS PO's items under
+  // the new PO's heading. View is now the in-place expand; Track owns the modal.
+  describe('View and Track are two different things', () => {
+    function trackerFor(over: Record<string, unknown> = {}) {
+      return {
+        poNumber: 'PO-001',
+        mrsNo: 'MRS-001',
+        supplier: 'Supplier A',
+        statusLabel: 'In Progress',
+        items: poRow().itemLines,
+        totals: { ...poRow().totals, procurementOutstanding: 40 },
+        ...over,
+      };
+    }
+
+    /** One not-yet-due PO on In Progress, where View replaces Receive. */
+    async function renderNotDue() {
+      getPOWorkload.mockResolvedValue(
+        workload({
+          receivingDue: [],
+          inProgress: [poRow({ receivingDue: false, statusLabel: 'In Progress' })],
+          inProgressCount: 1,
+        }),
+      );
+      getPOTracker.mockResolvedValue(trackerFor());
+      const result = render(<PurchaseOrdersView />);
+      await waitForCards();
+      await switchTo('In Progress', 'Open purchase orders');
+      await screen.findByText('PO-001');
+      return result;
+    }
+
+    const modalHeading = () => screen.queryByText(/Quantity Tracker/);
+
+    it('expands the purchase order in place, without opening the tracker modal', async () => {
+      const { container } = await renderNotDue();
+
+      fireEvent.click(screen.getByRole('button', { name: 'View' }));
+
+      expect(screen.getByText('THIS PURCHASE ORDER')).toBeTruthy();
+      expect(modalHeading()).toBeNull();
+      expect(getPOTracker).not.toHaveBeenCalled();
+      expect(poRows(container)[0].getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('offers Close once open, and collapses it again', async () => {
+      await renderNotDue();
+
+      fireEvent.click(screen.getByRole('button', { name: 'View' }));
+      // Assert open first, so a Close belonging to some other surface cannot
+      // satisfy the next click.
+      expect(screen.getByText('THIS PURCHASE ORDER')).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(screen.queryByText('THIS PURCHASE ORDER')).toBeNull();
+    });
+
+    it('opens the tracker modal from Track, and loads that purchase order', async () => {
+      await renderNotDue();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Track' }));
+
+      // The heading is claimed the moment the modal opens; the body must follow.
+      await waitFor(() => expect(getPOTracker).toHaveBeenCalledWith('PO-001'));
+      const modal = await screen.findByText(/Quantity Tracker/);
+      const panel = modal.closest('div[class*="max-w"]') as HTMLElement;
+      await waitFor(() => expect(panel.textContent).not.toContain('Loading…'));
+      expect(panel.textContent).toContain('Supplier A');
+      expect(panel.textContent).toContain('Cement');
+    });
+
+    it('shows each purchase order its own tracker, never the last one tracked', async () => {
+      const second = poRow({
+        poNumber: 'PO-002',
+        mrsNo: 'MRS-002',
+        supplier: 'Supplier B',
+        receivingDue: false,
+        statusLabel: 'In Progress',
+        itemLines: [
+          {
+            poItemId: 'pi-3',
+            itemDescription: 'Gravel',
+            unit: 'm3',
+            requestedQty: 10,
+            approvedQty: 10,
+            purchasedQty: 10,
+            receivedQty: 0,
+            receivingOutstanding: 10,
+            complete: false,
+          },
+        ],
+        totals: {
+          requested: 10,
+          approved: 10,
+          purchased: 10,
+          received: 0,
+          receivingOutstanding: 10,
+        },
+      });
+      getPOWorkload.mockResolvedValue(
+        workload({
+          receivingDue: [],
+          inProgress: [poRow({ receivingDue: false }), second],
+          inProgressCount: 2,
+        }),
+      );
+      // Each PO's own supplier, so a stale body is unmistakable.
+      getPOTracker.mockImplementation(async (poNumber: string) =>
+        trackerFor({
+          poNumber,
+          supplier: poNumber === 'PO-001' ? 'Supplier A' : 'Supplier B',
+          items: poNumber === 'PO-001' ? poRow().itemLines : second.itemLines,
+        }),
+      );
+      render(<PurchaseOrdersView />);
+      await waitForCards();
+      await switchTo('In Progress', 'Open purchase orders');
+      await screen.findByText('PO-002');
+
+      const openTrackerFor = async (poNumber: string) => {
+        const row = screen.getByText(poNumber).closest('tr[aria-expanded]') as HTMLElement;
+        fireEvent.click(within(row).getByRole('button', { name: 'Track' }));
+        const heading = await screen.findByText(new RegExp(`Quantity Tracker . ${poNumber}$`));
+        const panel = heading.closest('div[class*="max-w"]') as HTMLElement;
+        await waitFor(() => expect(panel.textContent).not.toContain('Loading…'));
+        fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+        return panel.textContent ?? '';
+      };
+
+      const first = await openTrackerFor('PO-001');
+      expect(first).toContain('Supplier A');
+      expect(first).toContain('Cement');
+
+      // PO-002's modal must carry PO-002's own lines, not the PO-001 body that
+      // was sitting in tracker state a moment ago.
+      const secondBody = await openTrackerFor('PO-002');
+      expect(secondBody).toContain('Supplier B');
+      expect(secondBody).toContain('Gravel');
+      expect(secondBody).not.toContain('Cement');
+      expect(getPOTracker).toHaveBeenCalledTimes(2);
+    });
+
+    it('cannot reach the modal at all without going through a load', async () => {
+      const { container } = await renderNotDue();
+
+      // The one invariant the old View broke: it opened the modal's state
+      // without the fetch that fills it, so the body was empty or someone else's.
+      fireEvent.click(screen.getByRole('button', { name: 'View' }));
+
+      expect(modalHeading()).toBeNull();
+      expect(getPOTracker).not.toHaveBeenCalled();
+      expect(poRows(container)[0].getAttribute('aria-expanded')).toBe('true');
+    });
+  });
+
   it('collapses the open purchase order when the section changes', async () => {
     const { container } = await renderView();
     fireEvent.click(poRows(container)[0]);
@@ -367,5 +563,129 @@ describe('the same purchase-order table serves the other sections', () => {
     expect(screen.getByText('THIS PURCHASE ORDER')).toBeTruthy();
     // A completed purchase order has nothing left to receive.
     expect(screen.queryByRole('button', { name: 'Receive' })).toBeNull();
+  });
+});
+
+// The warehouse's version of the purchaser's POs / MRS toggle.
+//
+// Same purchase orders either way — the toggle changes which row is the top
+// level, nothing else. It is NOT the purchaser's collapsible MRS row: an MRS has
+// no supplier and no status of its own, so the warehouse band is a thin heading
+// above PO rows that keep all ten columns, because supplier and PO date are what
+// the warehouse actually acts on.
+describe('grouping purchase orders under their material request', () => {
+  const showMrs = () => fireEvent.click(screen.getByRole('button', { name: 'MRS' }));
+
+  it('lists purchase orders, not material requests, by default', async () => {
+    const { container } = await renderView();
+
+    expect(screen.getByRole('button', { name: 'POs' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'MRS' }).getAttribute('aria-pressed')).toBe('false');
+    // The default order is the server's most-recently-updated queue, which is
+    // what a receiving list should read as. Grouping would bury that.
+    expect(bandRows(container)).toHaveLength(0);
+    expect(poRows(container)).toHaveLength(2);
+  });
+
+  it('heads each requirement with a band while leaving every PO row intact', async () => {
+    const { container } = await renderView();
+    showMrs();
+
+    expect(bandRows(container)).toHaveLength(2);
+    expect(bandRows(container)[0].textContent).toContain('MRS-001');
+    expect(bandRows(container)[1].textContent).toContain('MRS-002');
+
+    // The whole point: the same purchase orders, still purchase-order rows. A
+    // band is a heading, never a row the warehouse could receive against.
+    expect(poRows(container)).toHaveLength(2);
+    expect(screen.getByText('PO-001')).toBeTruthy();
+    expect(screen.getByText('PO-002')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Receive' })).toHaveLength(2);
+  });
+
+  it('quotes the requirement roll-up, never the sum of the rows beneath it', async () => {
+    const { container } = await renderView();
+    showMrs();
+
+    // MRS-001 is approved 150. PO-001 carries only its allocated share of that
+    // requirement, 120, and PO-002 belongs to MRS-002 entirely. Summing the rows
+    // would report the requirement wrongly in both directions.
+    expect(bandRows(container)[0].textContent).toContain('Approved 150');
+    expect(bandRows(container)[0].textContent).not.toContain('Approved 120');
+    // ...and the PO row still quotes its own share.
+    expect(poRows(container)[0].textContent).toContain('120');
+  });
+
+  it('carries the requisitioner and the balance on the band', async () => {
+    const { container } = await renderView();
+    showMrs();
+
+    const band = bandRows(container)[0].textContent ?? '';
+    expect(band).toContain('Site A');
+    expect(band).toContain('Purchased 80');
+    expect(band).toContain('Received 25');
+    expect(band).toContain('55 to receive');
+  });
+
+  it('leaves a purchase order with no material request unbanded, not mislabelled', async () => {
+    getPOWorkload.mockResolvedValue(
+      workload({
+        receivingDue: [poRow({ poNumber: 'PO-009', mrsNo: '' }), SECOND_PO],
+      }),
+    );
+    const { container } = render(<PurchaseOrdersView />);
+    await screen.findByText('PO-009');
+    showMrs();
+
+    // Two purchase orders, one requirement: the orphan PO gets no empty band,
+    // because there is no roll-up to put in one.
+    expect(bandRows(container)).toHaveLength(1);
+    expect(poRows(container)).toHaveLength(2);
+    expect(screen.getByText('PO-009')).toBeTruthy();
+  });
+
+  it('keeps a band out of the purchase-order rows', async () => {
+    const { container } = await renderView();
+    showMrs();
+
+    // The structural half of the grouping: a band is a heading, so it carries no
+    // aria-expanded and can never be read as a row to receive against.
+    for (const band of bandRows(container)) {
+      expect(band.hasAttribute('aria-expanded')).toBe(false);
+    }
+    expect(poRows(container).length + bandRows(container).length).toBe(4);
+  });
+
+  it('changes no quantity on any purchase-order row', async () => {
+    const { container } = await renderView();
+    const before = poRows(container).map((tr) => tr.textContent);
+    showMrs();
+    const after = poRows(container).map((tr) => tr.textContent);
+
+    // Presentation only. Sorting may reorder, but nothing on a row may move.
+    expect([...after].sort()).toEqual([...before].sort());
+  });
+
+  it('collapses the open purchase order when the presentation changes', async () => {
+    const { container } = await renderView();
+    fireEvent.click(poRows(container)[0]);
+    expect(screen.getByText('THIS PURCHASE ORDER')).toBeTruthy();
+
+    showMrs();
+
+    // The row it belonged to has moved, so it is not inherited across.
+    expect(screen.queryByText('THIS PURCHASE ORDER')).toBeNull();
+  });
+
+  it('groups within each section, keeping the section counts as PO counts', async () => {
+    const { container } = await renderView();
+    showMrs();
+    await switchTo('In Progress', 'Open purchase orders');
+
+    // In Progress is empty in this fixture, so neither rows nor bands.
+    expect(bandRows(container)).toHaveLength(0);
+    expect(poRows(container)).toHaveLength(0);
+    // The footer quotes the card's own number, which counts purchase orders.
+    expect(screen.getByText('0 purchase order(s)')).toBeTruthy();
   });
 });

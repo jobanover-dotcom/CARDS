@@ -232,7 +232,13 @@ function DashboardView() {
                   <SectionTable rows={data.preview} />
                   {data.itemCount > data.preview.length && (
                     <p className="p-3 m-0 text-[11px] text-[#999] text-center">
-                      Showing {data.preview.length} of {data.itemCount} items &mdash; use the Reports section below for the full dataset.
+                      Showing {data.preview.length} of {data.itemCount} items
+                      {overview?.truncated
+                        ? // The Reports section runs the SAME bounded scan, so
+                          // sending the user there would promise a complete dataset
+                          // that does not exist. State the shared limit instead.
+                          ' &mdash; the purchase-order scan limit was reached, so these counts and the Reports section below cover the same scanned subset.'
+                        : ' &mdash; use the Reports section below for the full dataset.'}
                     </p>
                   )}
                 </>

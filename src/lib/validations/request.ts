@@ -23,6 +23,81 @@ export const requestSchema = z.object({
 export type RequestInput = z.infer<typeof requestSchema>
 
 // ---------------------------------------------------------------------------
+// Warehouse Request creation — the `createRequest` contract.
+//
+// `requestSchema` above validates a SINGLE line of a request and was never used
+// by the action; createRequest took its payload untyped and applied one rule
+// (`isInteger && >= 1`) to quantities and nothing at all to strings. This is the
+// real boundary schema.
+//
+// Every string is trimmed first, so a whitespace-only value is rejected by the
+// `min(1)` that follows rather than being stored as `''`.
+// ---------------------------------------------------------------------------
+
+/**
+ * The largest quantity the database can hold, and therefore the ceiling the
+ * application enforces.
+ *
+ * `WarehouseRequestItem.qty` is a Prisma `Int`, which maps to PostgreSQL
+ * `integer` (int4): -2147483648..2147483647. Capping here means an out-of-range
+ * quantity is refused by the application with a clear message, instead of
+ * reaching PostgreSQL and surfacing as an opaque driver error.
+ *
+ * Deliberately the column's true maximum rather than a smaller invented
+ * business limit: no such rule exists in the repository, and inventing one
+ * would reject legitimate large requirements. The `int()` guard additionally
+ * excludes NaN, Infinity and anything beyond 2^53.
+ */
+export const MAX_REQUEST_QTY = 2_147_483_647
+
+const requiredText = (field: string, max: number) =>
+  z
+    .string({ required_error: `${field} is required`, invalid_type_error: `${field} is required` })
+    .trim()
+    .min(1, `${field} is required`)
+    .max(max, `Keep ${field.toLowerCase()} under ${max} characters`)
+
+export const createRequestItemSchema = z.object({
+  itemDescription: requiredText('Item description', 500),
+  qty: z
+    .number({ required_error: 'Quantity is required', invalid_type_error: 'Quantity must be a number' })
+    .int('Quantity must be a whole number')
+    .positive('Quantity must be a positive whole number')
+    .max(MAX_REQUEST_QTY, `Quantity cannot exceed ${MAX_REQUEST_QTY}`),
+  unit: requiredText('Unit', 50),
+})
+
+export const createRequestSchema = z
+  .object({
+    date: requiredText('Date', 50),
+    /**
+     * Server-generated. Accepted here only so the value can be IGNORED: the
+     * action always allocates its own and never persists this field.
+     */
+    reqNumber: z.string().optional(),
+    mrsNo: requiredText('MRS number', 100),
+    /**
+     * "Approved By (Site Engineer)" — a third party named by the warehouse, not
+     * the caller. Deliberately NOT derived from the session: the site engineer
+     * and the staff member filing the request are different people. Validated,
+     * never trusted as an identity.
+     */
+    requestedBy: requiredText('Approved By', 200),
+    requisitioner: requiredText('Requisitioner', 200),
+    followUpOfReqNumber: z.string().trim().min(1).max(100).nullish(),
+    followUpOfPoNumber: z.string().trim().min(1).max(100).nullish(),
+    items: z
+      .array(createRequestItemSchema)
+      .min(1, 'At least one item is required'),
+  })
+  // The caller can never name both a source request and a source PO.
+  .refine((v) => !(v.followUpOfReqNumber && v.followUpOfPoNumber), {
+    message: 'A follow-up request cannot reference both a request and a purchase order',
+  })
+
+export type CreateRequestInput = z.infer<typeof createRequestSchema>
+
+// ---------------------------------------------------------------------------
 // Follow-up Approval (Admin) — decides the quantity a PARTIALLY APPROVED request
 // has left undecided.
 //
@@ -169,12 +244,39 @@ export const warehouseSchema = z.object({
 
 export type WarehouseInput = z.infer<typeof warehouseSchema>
 
+/**
+ * The role values the application actually implements.
+ *
+ * `Admin` is the purchaser's role (displayed as "Purchaser (Admin)" by
+ * `src/lib/roleLabel.js`); `Purchaser` is only a display label and has never been
+ * a stored value — every guard in `actions/` compares against 'Admin'. This list
+ * previously read `['Superadmin', 'Purchaser', 'Warehouse']`, which both omitted
+ * 'Admin' and accepted a value no guard would ever match, so a profile written
+ * through it could satisfy no authorization check at all.
+ */
+export const PROFILE_ROLES = ['Superadmin', 'Admin', 'Warehouse'] as const
+export type ProfileRole = (typeof PROFILE_ROLES)[number]
+
 // Profile validation
 export const profileSchema = z.object({
   username: z.string().min(3, 'Username must be at least 3 characters').max(50),
   name: z.string().min(1, 'Name is required').max(100),
-  role: z.enum(['Superadmin', 'Purchaser', 'Warehouse']).default('Warehouse'),
+  role: z.enum(PROFILE_ROLES).default('Warehouse'),
   warehouse: z.string().optional(),
 })
 
 export type ProfileInput = z.infer<typeof profileSchema>
+
+/**
+ * Profile shape for CREATING an account, where `role` is mandatory.
+ *
+ * `profileSchema` defaults a missing role to 'Warehouse', which suits a form
+ * default but is wrong at an administration boundary: it would quietly create an
+ * account rather than reject a malformed request. This variant requires the role
+ * so `actions/users.ts addUser` fails closed on a missing one.
+ */
+export const profileCreateSchema = profileSchema.extend({
+  role: z.enum(PROFILE_ROLES),
+})
+
+export type ProfileCreateInput = z.infer<typeof profileCreateSchema>

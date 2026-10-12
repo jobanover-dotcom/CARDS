@@ -3,6 +3,8 @@
 import { prisma, runTx } from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
 import { getCurrentUser } from './auth';
+import { lockMRS } from '@/src/lib/poChain';
+import { reconcileMRSCompletion } from '@/src/lib/poStatusReconcile';
 import {
   COMPLETED_STATUSES,
   DELIVERY_STATUS,
@@ -12,9 +14,18 @@ import {
   poStatusLabel,
 } from '@/src/lib/deliveryStatus';
 import { isV1WorkflowPO } from '@/src/lib/poMigration';
-import { mrsItemAllowanceOf, readMRSAggregates } from '@/src/lib/mrsRequirement';
+import {
+  mrsItemAllowanceOf,
+  mrsRoomForNewPO,
+  readMRSData,
+  readMRSAggregates,
+} from '@/src/lib/mrsRequirement';
+import { aggregateItemQuantities, normalizeItemDescription } from '@/src/lib/mrsAggregates';
 import { deriveRequestApprovalStatus } from '@/src/lib/requestApproval';
-import { createPOFromApprovedRequestSchema } from '@/src/lib/validations/request';
+import {
+  createPOFromApprovedRequestSchema,
+  MAX_REQUEST_QTY,
+} from '@/src/lib/validations/request';
 
 export interface POQuery { offset?: number; limit?: number; status?: string; statusIn?: string[]; poType?: string; poTypeIn?: string[]; search?: string; warehouse?: string; hasReceivingDiscrepancy?: boolean; }
 
@@ -89,59 +100,205 @@ export interface POItemInput { itemDescription: string; qty: number; unit: strin
 // supplier here: the supplier belongs to the procurement act and is recorded
 // when the purchaser saves purchase quantities (actions/procurement.ts).
 type CreatePOData = { date: string; poNumber: string; items: POItemInput[]; requisitioner: string; mrsNo: string; poExpDate?: string; poRvdDate?: string; pickupBy?: string; plateNumber?: string; approvedBy?: string; listedBy?: string; notes?: string; warehouse: string; profileId?: string; };
-function withPoDefaults(data: CreatePOData) { const { items, ...rest } = data; return { ...rest, status: PO_STATUS.AWAITING_PURCHASE.value, poType: 'active-delivery', statusLabel: poStatusLabel(PO_STATUS.AWAITING_PURCHASE.value) }; }
+/**
+ * Server-owned columns for a new purchase order.
+ *
+ * `profileId` is the AUTHENTICATED creator, taken from the session rather than
+ * the payload. It used to arrive from `POCreationForm` as a plain argument and
+ * `withPoDefaults` spread it straight through, so a direct server-action call
+ * could attribute a purchase order to any profile. `getMyPOCount` — and so the
+ * Purchaser's "my purchase orders" count in PurchaserSettingsView — is keyed on
+ * this column, which makes it an accountability field rather than a convenience
+ * one.
+ *
+ * `warehouse` is the destination SITE the order is delivered to, which is a
+ * business choice the purchaser legitimately makes for a direct PO. It is
+ * resolved by `resolvePoWarehouse` before it reaches here; this function only
+ * carries it through.
+ */
+function withPoDefaults(data: CreatePOData, profileId: string | null) {
+  const { items, profileId: _ignored, ...rest } = data;
+  return {
+    ...rest,
+    profileId,
+    status: PO_STATUS.AWAITING_PURCHASE.value,
+    poType: 'active-delivery',
+    statusLabel: poStatusLabel(PO_STATUS.AWAITING_PURCHASE.value),
+  };
+}
 async function assertCanManagePOs() { const user = await getCurrentUser(); if (!user || (user.role !== 'Admin' && user.role !== 'Superadmin')) throw new Error('Unauthorized: only purchasers and superadmins can create purchase orders'); return user; }
-function validateItems(items: POItemInput[]) { if (!Array.isArray(items) || !items.length) throw new Error('At least one item is required'); for (const item of items) { if (!item.itemDescription?.trim()) throw new Error('Every item needs a description'); if (!Number.isInteger(item.qty) || item.qty < 1) throw new Error('Every item quantity must be a positive whole number'); } }
-function validateApprovedPOItems(requestItems: { itemDescription: string; qty: number; approvedQty: number | null; unit: string }[], poItems: POItemInput[]) { const requested = new Map(requestItems.map((i) => [i.itemDescription.trim().toLowerCase(), i])); for (const item of poItems) { const source = requested.get(item.itemDescription.trim().toLowerCase()); if (!source) throw new Error(`PO item "${item.itemDescription}" is not part of the source request`); const max = source.approvedQty ?? source.qty; if (item.qty > max) throw new Error(`PO quantity for "${item.itemDescription}" cannot exceed the approved quantity of ${max} ${source.unit}`); } }
+
+/**
+ * Resolves the site a direct purchase order is for.
+ *
+ * A direct PO carries no request to inherit from, so the only authoritative
+ * source available is the caller's own profile warehouse. That is used when the
+ * profile HAS one.
+ *
+ * A purchaser profile is normally global (`warehouse` is null in the seed and in
+ * every purchaser account the users page creates), so there is no trusted value
+ * to fall back to for them. Rather than silently filing the order against the
+ * purchaser's warehouse — or inventing a warehouse permission model — the
+ * submission is refused and the caller is told what is missing. POs raised from
+ * an approved Warehouse Request are unaffected: `createPOFromApprovedRequest`
+ * derives the warehouse from the request, which IS an authoritative source.
+ */
+async function resolvePoWarehouse(requested: string | undefined, user: { warehouse: string | null }) {
+  if (user.warehouse) return user.warehouse;
+  throw new Error(
+    'A purchase order must be raised against a warehouse. ' +
+      'Your account is not assigned to one — raise it from an approved Warehouse Request, ' +
+      'or have a Superadmin assign your account to a warehouse.',
+  );
+}
+function validateItems(items: POItemInput[]) {
+  if (!Array.isArray(items) || !items.length) throw new Error('At least one item is required');
+  for (const item of items) {
+    if (!item.itemDescription?.trim()) throw new Error('Every item needs a description');
+    // `Number.isInteger` is false for NaN and both infinities, so one rule covers
+    // the whole family.
+    if (!Number.isInteger(item.qty) || item.qty < 1) throw new Error('Every item quantity must be a positive whole number');
+    // PurchaseOrderItem.qty is a PostgreSQL integer (int4). Capping at the column
+    // ceiling here means an out-of-range quantity is refused with a clear message
+    // instead of surfacing as an opaque driver error. Same constant the request
+    // boundary uses, so both entry points share one ceiling.
+    if (item.qty > MAX_REQUEST_QTY) throw new Error(`Every item quantity cannot exceed ${MAX_REQUEST_QTY}`);
+  }
+}
+/**
+ * Caps every submitted line against the approval behind it.
+ *
+ * The cap is compared against the AGGREGATE for a description, not each line
+ * separately. Two lines of 30 for the same item against an approval of 40 both
+ * passed the old per-line comparison and were both persisted — 60 committed
+ * against 40. Both lines are still stored; what changes is that the sum is what
+ * gets checked, so what is validated is what is committed.
+ *
+ * The request side keeps one row per description (first match wins), which is
+ * the same rule the follow-up balance check uses. The PO side is what this
+ * function aggregates: a request that itself carries duplicate lines is a
+ * separate, already-documented condition (see requests.creation.test.ts) and is
+ * not re-decided here.
+ */
+function validateApprovedPOItems(requestItems: { itemDescription: string; qty: number; approvedQty: number | null; unit: string }[], poItems: POItemInput[]) {
+  const requested = new Map<string, (typeof requestItems)[number]>();
+  for (const i of requestItems) {
+    const key = normalizeItemDescription(i.itemDescription);
+    if (!requested.has(key)) requested.set(key, i);
+  }
+  const claimed = aggregateItemQuantities(poItems);
+  for (const [key, total] of claimed) {
+    const source = requested.get(key);
+    if (!source) {
+      const original = poItems.find((i) => normalizeItemDescription(i.itemDescription) === key)!;
+      throw new Error(`PO item "${original.itemDescription}" is not part of the source request`);
+    }
+    const max = source.approvedQty ?? source.qty;
+    if (total > max) {
+      const original = poItems.find((i) => normalizeItemDescription(i.itemDescription) === key)!;
+      throw new Error(`PO quantity for "${original.itemDescription}" cannot exceed the approved quantity of ${max} ${source.unit}`);
+    }
+  }
+}
 async function ensureMonitoringRows(tx: Prisma.TransactionClient, poNumber: string, items: { id: string }[]) { for (const item of items) await tx.purchaseOrderMonitoringItem.upsert({ where: { poItemId: item.id }, create: { poNumber, poItemId: item.id, qtyReceived: 0 }, update: {} }); }
 
 /**
  * A purchase order may only claim what its MATERIAL REQUEST still allows.
  *
- * validateApprovedPOItems() below caps a line against the approved quantity on
- * the request, which is the right ceiling for a single PO but says nothing about
- * the requirement's OTHER purchase orders. With MRS-001 approved 100 and a PO
- * already holding 60, raising another PO for 100 would buy 160 against a
- * requirement of 100. So the ceiling is the aggregate remainder across every PO on
- * the MRS — the same read the Follow-up Purchase action is guarded by, so the two
- * paths cannot disagree.
+ * Two ceilings, both required:
+ *
+ *   validateApprovedPOItems()  the approval behind the REQUEST — the right
+ *                              ceiling for a single PO, but blind to the
+ *                              requirement's other purchase orders.
+ *   assertWithinMRSAllowance()  the allowance left across EVERY PO on the MRS —
+ *                              which is what stops MRS-001 approved 100 with a
+ *                              PO already holding 60 from being topped up by a
+ *                              second PO for 100.
+ *
+ * The room is measured with `mrsRoomForNewPO` (the allocation walk), not with
+ * `procurementOutstanding`. That distinction is the reservation rule: the
+ * latter is `approved - purchased`, so a PO that was RAISED but never bought
+ * consumed nothing and any number of open POs could each claim the full
+ * remainder. The allocation walk counts a raised PO's share, so creating a PO
+ * reserves it.
+ *
+ * Quantities are AGGREGATED per normalized description before either comparison
+ * (P3-01), so two lines of 30 for one description are checked as 60 against the
+ * cap rather than as two independent 30s.
  *
  * No MRS number, or no approval behind it (a legacy manual PO), means there is no
- * requirement to cap against and the existing per-line check stands alone.
+ * requirement to cap against and the per-line approval check stands alone.
  */
 async function assertWithinMRSAllowance(
   tx: Prisma.TransactionClient,
   mrsNo: string | undefined,
   items: { itemDescription: string; qty: number }[],
+  /** The PO this allowance is being claimed FOR, when one already exists. */
+  excludePoNumber?: string,
 ) {
   if (!mrsNo?.trim()) return;
-  const aggregate = (await readMRSAggregates(tx, [mrsNo])).get(mrsNo);
-  if (!aggregate || !aggregate.lines.length) return;
-  const allowance = mrsItemAllowanceOf(aggregate);
-  for (const item of items) {
-    const line = allowance.get(item.itemDescription.trim().toLowerCase());
+  const data = await readMRSData(tx, [mrsNo]);
+  const room = mrsRoomForNewPO(data, mrsNo);
+  if (!room.size) return;
+  const claimed = aggregateItemQuantities(items);
+  for (const [key, total] of claimed) {
+    const line = room.get(key);
     // Unknown item: validateApprovedPOItems already rejects it when a request
     // exists. Here it simply does not constrain.
     if (!line) continue;
-    if (item.qty > line.remaining)
+    if (total > line.remaining)
       throw new Error(
-        `Quantity for "${item.itemDescription}" cannot exceed the ${line.remaining} ${line.unit || 'unit(s)'} ` +
+        `Quantity for "${items.find((i) => normalizeItemDescription(i.itemDescription) === key)!.itemDescription}" cannot exceed the ${line.remaining} ${line.unit || 'unit(s)'} ` +
           `still outstanding on ${mrsNo} across its existing purchase orders`,
       );
   }
 }
 
-export async function createPO(data: CreatePOData) { await assertCanManagePOs(); validateItems(data.items); return runTx(async (tx) => { await assertWithinMRSAllowance(tx, data.mrsNo, data.items); const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults(data), items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } }); await ensureMonitoringRows(tx, po.poNumber, po.items); return po; }); }
+export async function createPO(data: CreatePOData) {
+  const user = await assertCanManagePOs();
+  validateItems(data.items);
+  // Both resolved BEFORE the transaction: the creator and the destination site
+  // are session facts, never payload facts (P3-02).
+  const warehouse = await resolvePoWarehouse(data.warehouse, user);
+  return runTx(async (tx) => {
+    // The MRS-wide lock, because this PO's claim is measured against the whole
+    // allocation: two POs raised concurrently on one requirement would otherwise
+    // each read the same un-locked remainder and could together exceed it.
+    if (data.mrsNo) await lockMRS(tx, data.mrsNo);
+    // MRS claim is measured against the whole allocation, so this PO reserves
+    // what it takes and a second PO on the same MRS can only take the remainder.
+    await assertWithinMRSAllowance(tx, data.mrsNo, data.items);
+    const po = await tx.purchaseOrder.create({
+      data: {
+        ...withPoDefaults({ ...data, warehouse }, user.id),
+        items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) },
+      },
+      include: { items: true },
+    });
+    await ensureMonitoringRows(tx, po.poNumber, po.items);
+    // Raising a PO reserves its share of the requirement, which can leave a
+    // SIBLING with nothing left to buy and everything received — i.e. complete,
+    // with no write of its own to settle it. See src/lib/poStatusReconcile.ts.
+    await reconcileMRSCompletion(tx, data.mrsNo ?? '', user.username);
+    return po;
+  });
+}
 
 export async function createPOWithApproval(data: CreatePOData, source: { reqNumber: string; itemApprovals?: { id: string; approvedQty: number }[] }) {
-  await assertCanManagePOs(); validateItems(data.items);
+  const user = await assertCanManagePOs(); validateItems(data.items);
   return runTx(async (tx) => {
     const req = await tx.warehouseRequest.findUnique({ where: { reqNumber: source.reqNumber }, include: { items: true } }); if (!req) throw new Error(`Source request ${source.reqNumber} not found`);
+    // Same MRS-wide lock createPO takes: this PO's claim is measured against the
+    // whole allocation, and the approval writes below re-divided it further.
+    if (data.mrsNo) await lockMRS(tx, data.mrsNo);
+    // The REQUEST owns the warehouse here, exactly as it owns the MRS: an
+    // approval must not be redirectable to another site by the purchaser filing it.
+    const warehouse = req.warehouse ?? await resolvePoWarehouse(data.warehouse, user);
     const approvalMap = new Map((source.itemApprovals || []).map((a) => [a.id, a.approvedQty]));
     const effective = req.items.map((item) => ({ ...item, approvedQty: Math.max(0, Math.min(approvalMap.has(item.id) ? approvalMap.get(item.id)! : (item.approvedQty ?? item.qty), item.qty)) }));
     validateApprovedPOItems(effective, data.items);
     await assertWithinMRSAllowance(tx, data.mrsNo, data.items);
-    const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults(data), sourceReqNumber: source.reqNumber, items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } });
+    const po = await tx.purchaseOrder.create({ data: { ...withPoDefaults({ ...data, warehouse }, user.id), sourceReqNumber: source.reqNumber, items: { create: data.items.map((i) => ({ itemDescription: i.itemDescription, qty: i.qty, unit: i.unit })) } }, include: { items: true } });
     await ensureMonitoringRows(tx, po.poNumber, po.items);
     // Serialize approval writes on this request, so a concurrent Follow-up
     // Approval in the Request section cannot settle against the same stale
@@ -160,7 +317,12 @@ export async function createPOWithApproval(data: CreatePOData, source: { reqNumb
     // Derived from the lines this transaction actually wrote, so a request with
     // rejected quantity cannot be flipped back to "Partially Approved" here.
     const settled = await tx.warehouseRequestItem.findMany({ where: { reqNumber: source.reqNumber } });
-    await tx.warehouseRequest.update({ where: { reqNumber: source.reqNumber }, data: { status: deriveRequestApprovalStatus(settled, req.status) } }); return po;
+    await tx.warehouseRequest.update({ where: { reqNumber: source.reqNumber }, data: { status: deriveRequestApprovalStatus(settled, req.status) } });
+    // Raising a PO reserves its share of the requirement, which can leave a
+    // SIBLING with nothing left to buy and everything received — i.e. complete,
+    // with no write of its own to settle it. See src/lib/poStatusReconcile.ts.
+    await reconcileMRSCompletion(tx, data.mrsNo ?? '', user.username);
+    return po;
   });
 }
 
@@ -313,14 +475,16 @@ export async function createPOFromApprovedRequest(input: unknown) {
           // The request owns the warehouse; the caller cannot redirect an
           // approval to a different one.
           warehouse: req.warehouse ?? '',
-          profileId: data.profileId,
-        }),
+        }, user.id),
         sourceReqNumber: data.reqNumber,
         items: { create: lines.map((l) => ({ itemDescription: l.itemDescription, qty: l.qty, unit: l.unit })) },
       },
       include: { items: true },
     });
     await ensureMonitoringRows(tx, po.poNumber, po.items);
+    // Same MRS-wide lock createPO takes, and for the same reason: this PO's claim
+    // is measured against the requirement's whole allocation.
+    await lockMRS(tx, req.mrsNo);
 
     // Same log createFollowUpPO uses, so the new PO carries its own history entry
     // and the approval it fulfils is traceable from the PO as well as the request.
@@ -335,6 +499,11 @@ export async function createPOFromApprovedRequest(input: unknown) {
         actor: user.username,
       },
     });
+
+    // Raising a PO reserves its share of the requirement, which can leave a
+    // SIBLING with nothing left to buy and everything received — i.e. complete,
+    // with no write of its own to settle it. See src/lib/poStatusReconcile.ts.
+    await reconcileMRSCompletion(tx, req.mrsNo, user.username);
 
     return po;
   });
@@ -373,33 +542,118 @@ export async function updatePOMonitoring(poNumber: string, monitoring: Monitorin
 
 export async function updatePO(poNumber: string, data: Partial<{ status: string; poType: string; statusLabel: string; items: POItemInput[]; pickupBy: string; poExpDate: string; supplierAddress: string; notes: string; monQtyRvd: string; monDeliveredBy: string; monPlateNumber: string; monDateDelivered: string; monReferenceNo: string; monDrDate: string; monRemarks: string; }>) {
   const user = await getCurrentUser(); if (!user) throw new Error('Unauthorized'); const { items, ...rest } = data;
+  // Ownership is settled ONCE, before either write path can run. It used to sit
+  // inside the `touchesWorkflow` branch only, which left the plain
+  // `prisma.purchaseOrder.update` below reachable by a Warehouse user from any
+  // site — they could rewrite the supplier, pickup and monitoring fields of a PO
+  // belonging to another warehouse by supplying its poNumber.
+  const existing = await prisma.purchaseOrder.findUnique({ where: { poNumber }, include: { items: { select: { id: true, purchasedQty: true } }, _count: { select: { deliveries: true } } } });
+  if (!existing) throw new Error('Purchase order not found');
+  if (user.role === 'Warehouse' && existing.warehouse !== user.warehouse) throw new Error('Unauthorized');
   // Hardened generic patch: status/poType/statusLabel and item replacement are
   // legacy-only capabilities. On procurement-workflow POs they would bypass the
   // savePurchase / recordReceiving chain (and item replacement would
   // cascade-delete DeliveryItem archive history), so they are rejected here.
   const touchesWorkflow = data.status !== undefined || data.poType !== undefined || data.statusLabel !== undefined || items !== undefined;
   if (touchesWorkflow) {
-    const po = await prisma.purchaseOrder.findUnique({ where: { poNumber }, include: { items: { select: { purchasedQty: true } }, _count: { select: { deliveries: true } } } });
-    if (!po) throw new Error('Purchase order not found');
-    if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
     try {
-      assertLegacyPO({ status: po.status, items: po.items, _count: po._count });
+      assertLegacyPO({ status: existing.status, items: existing.items, _count: existing._count });
     } catch {
       throw new Error('This purchase order uses the procurement workflow; update it through savePurchase / recordReceiving instead');
     }
-    if (items !== undefined && po._count.deliveries > 0) throw new Error('PO items cannot be replaced once deliveries exist');
+    // Item replacement deletes every PurchaseOrderItem row and recreates them, so
+    // the old ids cease to exist. Three kinds of history hang off those ids:
+    //
+    //   * DeliveryItem        HAS a foreign key with ON DELETE CASCADE, so the
+    //                          archived delivery lines are destroyed outright.
+    //   * ReceivingRecord     has NO foreign key (deliberately — the row must
+    //     and ReceivingDiscrepancy   outlive the item), so the rows SURVIVE
+    //                          pointing at an item that no longer exists.
+    //
+    // The second case is the worse one: the receiving history becomes unreadable
+    // while the quantities it recorded still stand in PurchaseOrderItem columns
+    // that have just been recreated at zero. The legacy delivery count that used
+    // to gate this only ever covered the first case.
+    if (items !== undefined) {
+      if (existing._count.deliveries > 0) throw new Error('PO items cannot be replaced once deliveries exist');
+      const itemIds = existing.items.map((i) => i.id);
+      const [receiving, discrepancies] = await Promise.all([
+        prisma.receivingRecord.count({ where: { poNumber, poItemId: { in: itemIds } } }),
+        prisma.receivingDiscrepancy.count({ where: { poNumber, poItemId: { in: itemIds } } }),
+      ]);
+      if (receiving > 0 || discrepancies > 0)
+        throw new Error(
+          `PO items cannot be replaced once receiving history exists (${receiving} receiving record(s), ${discrepancies} discrepancy record(s)).`,
+        );
+    }
   }
-  if (items) return runTx(async (tx) => { const existing = await tx.purchaseOrder.findUnique({ where: { poNumber }, include: { items: true } }); if (!existing) throw new Error('Purchase order not found'); await tx.purchaseOrderItem.deleteMany({ where: { poNumber } }); const newItems = await Promise.all(items.map((i) => { validateItems([i]); return tx.purchaseOrderItem.create({ data: { poNumber, itemDescription: i.itemDescription, qty: i.qty, unit: i.unit } }); })); await tx.purchaseOrder.update({ where: { poNumber }, data: rest }); await ensureMonitoringRows(tx, poNumber, newItems); return tx.purchaseOrder.findUnique({ where: { poNumber }, include: poInclude }); });
+  if (items) return runTx(async (tx) => { await tx.purchaseOrderItem.deleteMany({ where: { poNumber } }); const newItems = await Promise.all(items.map((i) => { validateItems([i]); return tx.purchaseOrderItem.create({ data: { poNumber, itemDescription: i.itemDescription, qty: i.qty, unit: i.unit } }); })); await tx.purchaseOrder.update({ where: { poNumber }, data: rest }); await ensureMonitoringRows(tx, poNumber, newItems); return tx.purchaseOrder.findUnique({ where: { poNumber }, include: poInclude }); });
   return prisma.purchaseOrder.update({ where: { poNumber }, data: rest, include: poInclude });
 }
 async function assertCanDeletePOs() { const user = await getCurrentUser(); if (!user || user.role !== 'Superadmin') throw new Error('Unauthorized: only superadmin can delete purchase orders'); return user; }
 export async function deletePO(poNumber: string) {
   await assertCanDeletePOs();
-  // DeliveryAuditLog references a PO by poNumber with no foreign key, so a bare
-  // delete would orphan the purchase and receiving history. Remove it in the
-  // same transaction so a deleted PO leaves no dangling audit rows.
+
+  /**
+   * Guarded rather than archived (P3-03).
+   *
+   * Every table that references PurchaseOrder.poNumber carries
+   * ON DELETE CASCADE, so `purchaseOrder.delete` destroys the PO's items,
+   * monitoring rows, supplier receipts, DELIVERY records and — critically —
+   * `ReceivingRecord` and `ReceivingDiscrepancy` (migrations
+   * 20261008030106 and 20261008040312). That is the warehouse's record of what
+   * physically arrived, and it is gone for good: `deletePO` has no archive path.
+   *
+   * The existing `WarehouseArchive` CANNOT stand in for one. It snapshots a PO
+   * with `include: { items: true }` — no receiving records, no discrepancies —
+   * and `restoreArchive` recreates only PurchaseOrder and WarehouseRequest rows
+   * and their items. A snapshot taken here would be readable but not restorable,
+   * which is exactly the "history preserved" claim the audit warned against
+   * making. Preserving it properly needs a schema change (a PO-scoped archive,
+   * or the receiving tables included in the snapshot AND in the restore path),
+   * which is outside this task's authority.
+   *
+   * AUDIT history is guarded on the same grounds. `DeliveryAuditLog` also
+   * references the PO by `poNumber` with no foreign key, so nothing cascades it
+   * away — `deletePO` used to delete those rows explicitly, which destroyed the
+   * recorded purchase/follow-up history of a PO that had been bought but not yet
+   * received (a `purchase_saved` row exists with no receiving record). Leaving
+   * them behind instead is not a fix: `getPOAuditLog` reads through the parent PO
+   * and throws when it is gone, so the rows would survive as unreachable orphans.
+   *
+   * So deletion is refused when ANY of the three histories exists: receiving,
+   * discrepancy, or audit. A PO that was never received carries no such evidence
+   * and may still be deleted, which preserves the existing capability.
+   */
+  const [receiving, discrepancies, auditEntries] = await Promise.all([
+    prisma.receivingRecord.count({ where: { poNumber } }),
+    prisma.receivingDiscrepancy.count({ where: { poNumber } }),
+    prisma.deliveryAuditLog.count({ where: { poNumber } }),
+  ]);
+  if (receiving > 0 || discrepancies > 0 || auditEntries > 0) {
+    throw new Error(
+      `Purchase order ${poNumber} cannot be deleted: it holds recorded history ` +
+        `(${receiving} receiving record(s), ${discrepancies} discrepancy record(s), ` +
+        `${auditEntries} audit entr(ies)) which would be destroyed. ` +
+        `Archiving that history is not supported yet.`,
+    );
+  }
+
+  // Reached only when all three counts are zero, so there is no history left to
+  // destroy. The PO delete below is still the FIRST write in the transaction:
+  // an audit row is never deleted before the PO it describes, and none is
+  // deleted at all here.
   return runTx(async (tx) => {
-    await tx.deliveryAuditLog.deleteMany({ where: { poNumber } });
-    return tx.purchaseOrder.delete({ where: { poNumber } });
+    // Read the MRS before the delete: removing a PO returns whatever it reserved
+    // to the requirement's leftover pool, which can leave a surviving sibling
+    // responsible for more than it has bought and received.
+    const doomed = await tx.purchaseOrder.findUnique({
+      where: { poNumber },
+      select: { mrsNo: true },
+    });
+    if (doomed?.mrsNo) await lockMRS(tx, doomed.mrsNo);
+    const deleted = await tx.purchaseOrder.delete({ where: { poNumber } });
+    await reconcileMRSCompletion(tx, doomed?.mrsNo ?? '', 'deletePO', 'both');
+    return deleted;
   });
 }

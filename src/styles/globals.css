@@ -19,3 +19,26 @@ code {
   width: 100%;
   height: 100%;
 }
+
+/* Printable Receiving Report. When printing, only the `.receiving-report`
+   document paints: the app behind the modal, the modal backdrop, and every
+   `.no-print` control (headers, Print/Close buttons) are hidden. The report
+   itself is positioned at the page origin so no blank first page is emitted. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .receiving-report,
+  .receiving-report * {
+    visibility: visible;
+  }
+  .receiving-report {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

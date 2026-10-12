@@ -1,6 +1,5 @@
 'use client';
 import React, { useState } from 'react';
-import ExcelJS from 'exceljs';
 import StatusBadge from '../ui/StatusBadge';
 import DataTable from '../ui/DataTable';
 import TableSkeleton from '../ui/TableSkeleton';
@@ -13,6 +12,7 @@ import {
   REPORT_ORDER,
 } from '../../lib/reports';
 import { getReportRows } from '../../../actions/procurement';
+import { buildReportWorkbook, downloadWorkbook } from '../../lib/reportWorkbook';
 
 // Dashboard reporting. Four reports, one card each.
 //
@@ -65,41 +65,38 @@ const PREVIEW_COLUMNS = [
     cell: (r) => (
       <>
         <StatusBadge status={r.itemStatusLabel ?? '—'} />
-        {r.hasDiscrepancy ? (
+        {r.hasDiscrepancy || r.discrepancy ? (
           <span className="ml-1"><QtyDiscrepancy value={r.qtyDiscrepancy} flagged /></span>
         ) : null}
       </>
     ),
   },
+  // The discrepancy columns below are empty on the Purchase Orders and
+  // Monitoring reports, which is why they render as a dash rather than being
+  // hidden: PREVIEW_COLUMNS is one definition shared by all four report cards,
+  // and a card that showed a different set of columns per report would be
+  // showing the purchaser something the export does not contain.
+  {
+    key: 'discrepancy',
+    label: 'Discrepancy',
+    cell: (r) =>
+      r.discrepancy ? (
+        <span className="text-[#c62828] font-semibold">{r.discrepancy.discrepancyType}</span>
+      ) : (
+        <span className="text-[#bbb]">&mdash;</span>
+      ),
+  },
+  {
+    key: 'discrepancyStatus',
+    label: 'Flag Status',
+    nowrap: true,
+    cell: (r) =>
+      r.discrepancy ? <StatusBadge status={r.discrepancy.statusLabel} /> : <span className="text-[#bbb]">&mdash;</span>,
+  },
 ];
 
-const argb = (rgb) => `FF${rgb}`;
-const thinSide = (rgb) => ({ style: 'thin', color: { argb: argb(rgb) } });
-const thinBorder = (rgb) => {
-  const side = thinSide(rgb);
-  return { top: side, left: side, bottom: side, right: side };
-};
-
-async function downloadWorkbook(wb, filename) {
-  const buffer = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function isoOrBlank(value) {
-  if (!value) return '';
-  const d = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-}
-
-function ReportCard({ report, warehouse, expanded, onToggle, onExportCsv, rows, loading, rowCount }) {
+function ReportCard({ report, warehouse, expanded, onToggle, onExportCsv, rows, loading, rowCount, truncated }) {
+  if (truncated === undefined) truncated = false;
   const def = reportDefinition(report);
   const accent = ACCENTS[def.accent] ?? ACCENTS.slate;
   const preview = (rows ?? []).slice(0, PREVIEW_LIMIT);
@@ -157,17 +154,65 @@ function ReportCard({ report, warehouse, expanded, onToggle, onExportCsv, rows, 
                   </tr>
                 }
               />
-              {rowCount > preview.length && (
+              {truncated ? (
+                // The PO scan is bounded by WORKLOAD_SCAN_LIMIT. When the limit
+                // was reached, `total` is itself an under-count, so neither the
+                // preview note nor the export can truthfully claim completeness.
+                <p className="p-3 m-0 text-[11px] text-[#e65100] font-semibold text-center">
+                  The purchase-order scan limit was reached, so this preview and the export may be missing purchase orders.
+                </p>
+              ) : rowCount > preview.length ? (
                 <p className="p-3 m-0 text-[11px] text-[#999] text-center">
                   Showing {preview.length} of {rowCount} rows &mdash; the export contains all {rowCount}.
                 </p>
-              )}
+              ) : null}
             </>
           )}
         </div>
       )}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Incomplete-export messaging (P6-01).
+//
+// The purchase-order scan is bounded by WORKLOAD_SCAN_LIMIT, so an export can
+// legitimately cover only part of the matching data. The rule these messages
+// follow: say what was actually downloaded, and never tell the user the complete
+// dataset is available somewhere else — because it is not. The full set is only
+// reachable by raising the scan limit in the server, which no button does.
+// ---------------------------------------------------------------------------
+
+/** The scan ceiling, restated for the user rather than hidden behind "may be incomplete". */
+const SCAN_LIMIT_NOTE = 'The purchase-order scan limit was reached, so this dataset is incomplete.';
+
+function confirmTruncatedCsv(report, rows) {
+  return window.confirm(
+    `${SCAN_LIMIT_NOTE}\n\n` +
+      `The ${reportDefinition(report).name} CSV is about to download with ${rows} row(s) from the scanned ` +
+      `subset only — purchase orders beyond the scan limit are not included.\n\n` +
+      `Download it anyway?`,
+  );
+}
+
+function truncatedCsvMessage(report, rows) {
+  return `${SCAN_LIMIT_NOTE} The ${reportDefinition(report).name} CSV downloaded ${rows} row(s) from the ` +
+    `scanned subset only.`;
+}
+
+function confirmTruncatedWorkbook(names, rows) {
+  return window.confirm(
+    `${SCAN_LIMIT_NOTE}\n\n` +
+      `These sheets are incomplete: ${names.join(', ')}.\n` +
+      `The workbook is about to download with ${rows} row(s) from the scanned subset only.\n\n` +
+      `Download it anyway?`,
+  );
+}
+
+function truncatedWorkbookMessage(names, rows) {
+  return `${SCAN_LIMIT_NOTE} The workbook downloaded ${rows} row(s) from the scanned subset only; ` +
+    `these sheets are incomplete: ${names.join(', ')}.`;
 }
 
 export default function ReportCards({ warehouse }) {
@@ -177,6 +222,10 @@ export default function ReportCards({ warehouse }) {
   const [exporting, setExporting] = useState(null);
   const [workbookBusy, setWorkbookBusy] = useState(false);
   const [error, setError] = useState(null);
+  // A download that succeeded but is INCOMPLETE. Separate from `error` so an
+  // incomplete export is never reported as a failure, and a real failure is never
+  // dressed up as a warning.
+  const [notice, setNotice] = useState(null);
 
   const toggle = async (report) => {
     if (expanded === report) {
@@ -200,10 +249,23 @@ export default function ReportCards({ warehouse }) {
   const exportCsv = async (report) => {
     setExporting(report);
     setError(null);
+    setNotice(null);
     try {
       const res = await getReportRows({ report, warehouse: warehouse || undefined });
+      // P6-01: `truncated` is a RELIABLE signal, not a guess from the row count.
+      // The action fetches limit + 1 purchase orders and sets the flag when more
+      // exist (collect(), WORKLOAD_SCAN_LIMIT), so `true` means the dataset is
+      // genuinely partial and `false` means it is genuinely complete. It is
+      // checked strictly === true so a complete export never shows a warning.
+      if (res.truncated === true && !confirmTruncatedCsv(report, res.rows.length)) {
+        setExporting(null);
+        return;
+      }
       const def = reportDefinition(report);
       downloadCsv(toCsv(def.columns, res.rows), reportFilename(report));
+      if (res.truncated === true) {
+        setNotice(truncatedCsvMessage(report, res.rows.length));
+      }
     } catch (e) {
       setError(e?.message || 'Failed to export report');
     } finally {
@@ -211,54 +273,41 @@ export default function ReportCards({ warehouse }) {
     }
   };
 
-  // One workbook, four sheets. Every sheet is built from the same report rows the
-  // CSV uses, so the two exports can never disagree.
+  // One workbook, four sheets. Every sheet is built by the shared builder in
+  // src/lib/reportWorkbook.ts from the same report rows the CSV uses, so the two
+  // exports can never disagree — and so the archive download (same builder, same
+  // definitions) is column-for-column this workbook.
   const exportWorkbook = async () => {
     setWorkbookBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      const wb = new ExcelJS.Workbook();
-      wb.creator = 'CARDS';
-      const headerStyle = {
-        font: { bold: true, color: { argb: 'FFFFFFFF' } },
-        fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3C72' } },
-        border: thinBorder('999999'),
-      };
-      const cellStyle = { border: thinBorder('DDDDDD') };
-
+      const sheets = [];
+      // Each report is its own scan, so a workbook is complete only when EVERY
+      // sheet is. One truncated sheet makes the whole file partial, and the user
+      // is told which ones.
+      const truncatedSheets = [];
+      let truncatedRows = 0;
       for (const report of REPORT_ORDER) {
         const res = await getReportRows({ report, warehouse: warehouse || undefined });
-        const def = reportDefinition(report);
-        const ws = wb.addWorksheet(def.name.slice(0, 31));
-        ws.addRow([def.name]);
-        ws.addRow([def.description]);
-        if (warehouse) ws.addRow([`Warehouse: ${warehouse}`]);
-        ws.addRow([]);
-        ws.addRow(def.columns.map((c) => c.label));
-        const headerRow = ws.rowCount;
-        for (const r of res.rows) {
-          ws.addRow(
-            def.columns.map((c) => {
-              const key = c.key;
-              if (key === 'discrepancyFlag') return r.hasDiscrepancy === true ? 'Yes' : 'No';
-              if (key === 'purchaseDate' || key === 'receivedDate') return isoOrBlank(r[key]);
-              const v = r[key];
-              if (v === null || v === undefined || v === '') return '';
-              return v;
-            }),
-          );
+        if (res.truncated === true) {
+          truncatedSheets.push(reportDefinition(report).name);
+          truncatedRows += res.rows.length;
         }
-        ws.getRow(headerRow).eachCell({ includeEmpty: false }, (cell) => Object.assign(cell, headerStyle));
-        for (let i = headerRow + 1; i <= ws.rowCount; i++) {
-          ws.getRow(i).eachCell({ includeEmpty: false }, (cell) => Object.assign(cell, cellStyle));
-        }
-        def.columns.forEach((c, i) => {
-          ws.getColumn(i + 1).width = c.numeric ? 14 : Math.min(Math.max(c.label.length + 6, 12), 34);
-        });
+        sheets.push({ report, rows: res.rows });
       }
-
+      if (truncatedSheets.length && !confirmTruncatedWorkbook(truncatedSheets, truncatedRows)) {
+        setWorkbookBusy(false);
+        return;
+      }
+      const blob = await buildReportWorkbook(sheets, {
+        subtitle: warehouse ? `Warehouse: ${warehouse}` : null,
+      });
       const stamp = new Date().toISOString().slice(0, 10);
-      await downloadWorkbook(wb, `CARDS_Reports_${stamp}.xlsx`);
+      downloadWorkbook(blob, `CARDS_Reports_${stamp}.xlsx`);
+      if (truncatedSheets.length) {
+        setNotice(truncatedWorkbookMessage(truncatedSheets, truncatedRows));
+      }
     } catch (e) {
       setError(e?.message || 'Failed to build workbook');
     } finally {
@@ -285,6 +334,14 @@ export default function ReportCards({ warehouse }) {
       </div>
 
       {error && <p className="mb-3 text-[13px] text-[#c62828] font-semibold">{error}</p>}
+      {notice && (
+        <p
+          role="status"
+          className="mb-3 text-[13px] text-[#e65100] font-semibold border-l-4 border-[#e65100] pl-2"
+        >
+          {notice}
+        </p>
+      )}
 
       <div className="flex flex-col gap-3">
         {REPORT_ORDER.map((report) => (
@@ -297,6 +354,7 @@ export default function ReportCards({ warehouse }) {
             onExportCsv={() => exportCsv(report)}
             rows={data[report]?.rows}
             rowCount={data[report]?.total ?? 0}
+            truncated={data[report]?.truncated ?? false}
             loading={loading === report || exporting === report}
           />
         ))}

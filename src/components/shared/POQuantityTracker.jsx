@@ -75,6 +75,21 @@ function TrackerTable({ tracker, actionSlot, lastColumn = 'status' }) {
             <tr key={it.poItemId} className="border-b border-[#f1f1f1] last:border-b-0">
               <td className="py-2 pr-3 font-medium text-[#333]">
                 {it.itemDescription} <span className="text-[10px] font-normal text-[#888]">({it.unit})</span>
+                {/* An open flag on THIS line. Item-level on purpose: a PO-level
+                    badge would tell the reader that something was wrong without
+                    telling them what, which is the one thing they need in order to
+                    act on it. Rendered from the server's own field, never
+                    inferred from an outstanding balance — a line waiting for the
+                    rest of its delivery is not discrepant. */}
+                {it.openDiscrepancy && (
+                  <div className="text-[10px] text-[#c62828] font-semibold mt-0.5">
+                    Discrepancy: {it.openDiscrepancy.discrepancyType}
+                    <span className="text-[#888] font-normal">
+                      {' '}· {it.openDiscrepancy.reportedBy},{' '}
+                      {new Date(it.openDiscrepancy.reportedAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                )}
               </td>
               <td className="py-2 pr-3 text-right tabular-nums">{it.approvedQty}</td>
               <td className="py-2 pr-3 text-right tabular-nums">{it.purchasedQty}</td>
@@ -124,6 +139,7 @@ function POQuantityTracker({ tracker, variant = 'warehouse', actionSlot = null }
       <div className="grid grid-cols-2 gap-3 text-[12px]">
         <div><span className="font-bold text-[#666]">PO </span><span className="font-semibold">{tracker.poNumber}</span></div>
         <div><span className="font-bold text-[#666]">SUPPLIER </span><span className="font-semibold">{tracker.supplier || '— not purchased yet'}</span></div>
+        <div><span className="font-bold text-[#666]">SUPPLIER RR/DR </span><span className="font-semibold">{tracker.supplierRrDrNo || '—'}</span></div>
         <div><span className="font-bold text-[#666]">MRS </span><span className="font-semibold">{tracker.mrsNo || '—'}</span></div>
         <div><span className="font-bold text-[#666]">STATUS </span><span className="font-semibold">{tracker.statusLabel}</span></div>
         {tracker.sourceReqNumber && <div><span className="font-bold text-[#666]">SOURCE REQ </span><span className="font-semibold">{tracker.sourceReqNumber}</span></div>}

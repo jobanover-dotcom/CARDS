@@ -26,6 +26,12 @@ model PurchaseOrder {
   // Nullable because an approved requirement has no supplier yet.
   supplier String?
   supplierAddress String?
+  // The supplier's own Receiving Report (RR) / Delivery Receipt (DR) number, as
+  // printed on the supplier's document. NOT the CARDS PO number and NOT a
+  // CARDS-generated receipt number. Optional: a PO can be raised and purchased
+  // before the supplier reference is known. Deliberately not monReferenceNo —
+  // that field belongs to the retired single-shot monitoring workflow.
+  supplierRrDrNo String?
   requisitioner String
   mrsNo String
   poExpDate String?
@@ -63,6 +69,7 @@ model PurchaseOrder {
   // one — but several may exist, one per receiving event.
   receipts PurchaseOrderReceipt[]
   receivingRecords ReceivingRecord[]
+  receivingDiscrepancies ReceivingDiscrepancy[]
   // Historical shipment records. The active workflow no longer creates
   // these — supplier delivery is external to CARDS. Read-only archive.
   deliveries Delivery[]
@@ -231,6 +238,63 @@ model ReceivingRecord {
   @@index([poNumber, createdAt])
 }
 
+// One exception the Warehouse Checker found with a delivered PO item.
+//
+// NOT the legacy discrepancy flag. `PurchaseOrder.poType = 'discrepancy'` and
+// `Delivery.status = 'discrepancy'` are archive concepts with no writer left in
+// the current workflow — see deliveryStatus.ts — so nothing can create one
+// today. This is the ACTIVE record, and it is the only place the live workflow
+// writes the word "discrepancy".
+//
+// It is per ITEM, not per PO. A delivery of fifty bags of cement and fifty boxes
+// of nails is one purchase order but two separate physical checks, and a problem
+// with the nails says nothing about the cement.
+//
+// Deliberately carries NO quantity of its own. A discrepancy never changes what
+// was bought or what arrived: the checker simply records the acceptable count
+// as `receivedQty` and then says what was wrong with the rest. There is no
+// damagedQty, no wrongItemQty, no rejectedReceivedQty — the canonical chain
+// stays APPROVED -> PURCHASED -> RECEIVED on PurchaseOrderItem, and reports read
+// it live from there rather than from a snapshot here.
+//
+// A short receipt is NOT a discrepancy and must never create one of these: if
+// fifty were bought and forty arrived with nothing wrong, that is ordinary
+// receiving outstanding. A row appears only when a checker actively reports a
+// problem with what was delivered.
+//
+// Rows are never deleted. Resolving one sets status/resolvedBy/resolvedAt/
+// resolution and leaves the original report intact, so the history always shows
+// that a discrepancy was raised and what became of it.
+model ReceivingDiscrepancy {
+  id String @id @default(uuid())
+  poNumber String
+  po PurchaseOrder @relation(fields: [poNumber], references: [poNumber], onDelete: Cascade)
+  poItemId String
+  /// Snapshotted like ReceivingRecord does, so a report row still renders a
+  /// readable name even if the item is later renamed on the PO.
+  itemDescription String
+  unit String
+  /// Free text, NOT an enum. RECEIVING_DISCREPANCY_SUGGESTIONS offers six
+  /// starting points and nothing more: a checker must be able to report a
+  /// problem in their own words, so the field can never be restricted to a list.
+  discrepancyType String
+  /// The checker's explanation, in their own words.
+  remarks String?
+  /// 'open' | 'resolved' — see RECEIVING_DISCREPANCY_STATUS. Open rows are the
+  /// purchaser's active queue; resolved rows are history.
+  status String @default("open")
+  reportedBy String
+  reportedAt DateTime @default(now())
+  resolvedBy String?
+  resolvedAt DateTime?
+  /// Why the investigation concluded no further action was needed. Required on
+  /// resolution — "resolved" with no reason recorded is not an audit trail.
+  resolution String?
+  @@index([poNumber])
+  @@index([poNumber, status])
+  @@index([status])
+}
+
 // Approval decisions taken on a warehouse request.
 //
 // DeliveryAuditLog is PO-scoped (poNumber is NOT NULL), so request decisions
@@ -269,6 +333,20 @@ model WarehouseArchive {
   requestCount Int @default(0)
   poData Json
   requestData Json
+  // Everything the cascade would destroy alongside the POs and requests.
+  //
+  // poData/requestData hold PurchaseOrder+items and WarehouseRequest+items, and
+  // that is ALL they held: deleting a purchase order cascades to ReceivingRecord,
+  // ReceivingDiscrepancy, PurchaseOrderMonitoringItem and PurchaseOrderReceipt,
+  // and deleting a request cascades to RequestApprovalLog (prisma/schema.prisma
+  // lines 122, 152, 218, 265, 300). None of those were in the snapshot, so a
+  // restore had nothing to put them back from — the receiving history and every
+  // approval decision were simply gone.
+  //
+  // NULLABLE and null on every row archived before this column existed. A null
+  // is the signal: that archive predates the fix, so the download degrades to
+  // blanks rather than inventing data it never captured.
+  relatedData Json?
   createdAt DateTime @default(now())
 }
 

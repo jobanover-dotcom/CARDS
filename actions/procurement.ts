@@ -10,7 +10,9 @@ import {
   IN_PROGRESS_LIFECYCLE_STATUSES,
   PO_STATUS,
   PO_TYPE_ACTIVE_DELIVERY,
+  RECEIVING_DISCREPANCY_STATUS,
   hasReceivingDiscrepancy,
+  isDiscrepancyPO,
   poDisplayLabel,
   poLifecycle,
   poStatusLabel,
@@ -39,7 +41,9 @@ import {
   createFollowUpPOSchema,
   editReceivingSchema,
   recordReceivingSchema,
+  resolveDiscrepancySchema,
   savePurchaseSchema,
+  updateSupplierRrDrNoSchema,
 } from '@/src/lib/validations/delivery';
 import {
   aggregateMRS,
@@ -48,8 +52,9 @@ import {
   type MRSLine,
   type MRSAggregate,
 } from '@/src/lib/mrsAggregates';
+import { toPODiscrepancyRow } from '@/src/lib/archiveReportRows';
 import {
-  mrsItemAllowanceOf,
+  mrsRoomForNewPO,
   mrsTotalsOf,
   readMRSAllocationFor,
   readMRSData,
@@ -57,6 +62,15 @@ import {
   type MRSRequirementTotals,
 } from '@/src/lib/mrsRequirement';
 import { getPurchaseOrderReceiptCounts } from './poReceipts';
+import {
+  chainFromPO,
+  loadSourceRequest,
+  lockMRS,
+  lockPO,
+  type POChainItem,
+  type PODiscrepancyRow,
+} from '@/src/lib/poChain';
+import { reconcileMRSCompletion } from '@/src/lib/poStatusReconcile';
 import { isReportType, type ReportType } from '@/src/lib/reports';
 
 // ---------------------------------------------------------------------------
@@ -105,11 +119,26 @@ async function assertCanManagePOs() {
   return user;
 }
 
+/**
+ * Ownership check for receiving.
+ *
+ * Fails closed on an unassigned purchase order. The previous form,
+ * `if (poWarehouse && poWarehouse !== user.warehouse)`, skipped the comparison
+ * whenever the PO had no warehouse, so a null-warehouse PO passed for EVERY
+ * Warehouse user — any site could record receiving against, and edit receiving
+ * history on, a PO belonging to nobody.
+ *
+ * A PO with no warehouse is owned by nobody, so nobody may receive it through
+ * this path. Assigning it is a separate administrative decision, not something a
+ * receiving user may imply.
+ */
 async function assertWarehouseOwns(poWarehouse: string | null) {
   const user = await getCurrentUser();
   if (!user || user.role !== 'Warehouse')
     throw new Error('Unauthorized: only warehouse users can record receiving');
-  if (poWarehouse && poWarehouse !== user.warehouse)
+  if (!poWarehouse)
+    throw new Error('Unauthorized: purchase order is not assigned to a warehouse');
+  if (poWarehouse !== user.warehouse)
     throw new Error('Unauthorized: purchase order belongs to another warehouse');
   return user;
 }
@@ -135,67 +164,22 @@ async function audit(
   });
 }
 
-/** Serialize per-PO quantity writes so two concurrent saves cannot over-claim. */
-async function lockPO(tx: Tx, poNumber: string) {
-  await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "poNumber" = ${poNumber} FOR UPDATE`;
-}
-
-/**
- * Serialize per-MRS writes by locking EVERY purchase order on the MRS at once.
- *
- * lockPO() is no longer sufficient for a follow-up: the quantity being claimed is
- * the MRS-wide procurement shortfall, so two concurrent follow-ups on two
- * different POs of the same MRS would each read the same un-locked remainder and
- * could together claim more than the requirement allows. Locking every row of the
- * MRS serializes them, and re-reading the aggregate inside the transaction then
- * makes the second one see the first one's new PO.
- *
- * Advisory row locks only — this touches no data and needs no schema support.
- */
-async function lockMRS(tx: Tx, mrsNo: string) {
-  await tx.$queryRaw`SELECT "poNumber" FROM "PurchaseOrder" WHERE "mrsNo" = ${mrsNo} FOR UPDATE`;
-}
-
 // ---------------------------------------------------------------------------
-// Canonical per-item chain
+// Canonical per-item chain, and the reconciler that settles one requirement's
+// purchase orders against each other.
+//
+// Both live in src/lib/ rather than here because actions/pos.ts needs them too: it
+// raises purchase orders, and raising one reserves its share of the requirement —
+// which can leave a SIBLING with nothing left to buy and everything received, i.e.
+// complete, with no write of its own to notice.
+//
+// Imported from there directly — NOT re-exported below. A "use server" module may
+// only export async function declarations, so `export { x } from '...'` fails the
+// build even when x is async: the export is a re-export binding, not an async
+// function this module declares. See deliveryQuantities.ts for the same rule.
 // ---------------------------------------------------------------------------
 
-export interface POChainItem extends POItemChain {
-  poItemId: string;
-  itemDescription: string;
-  unit: string;
-}
-
-// matchRequestItem() now lives in src/lib/mrsAggregates.ts so the per-PO chain
-// below and the MRS aggregate resolve a PO line against its approved requirement
-// line through one comparison.
-
-/**
- * Resolve the source request for approved quantities: explicit
- * sourceReqNumber first, then the earliest mrsNo match. Returns null for
- * legacy/manual POs, where the PO line quantity is the approved quantity.
- *
- * Because it matches on mrsNo, every PO raised against one MRS resolves the SAME
- * request — which is exactly what makes the approved quantity an MRS-level fact
- * rather than a per-PO one.
- */
-async function loadSourceRequest(
-  tx: Tx,
-  po: { sourceReqNumber: string | null; mrsNo: string },
-) {
-  if (po.sourceReqNumber) {
-    const direct = await tx.warehouseRequest.findUnique({
-      where: { reqNumber: po.sourceReqNumber },
-      include: { items: true },
-    });
-    if (direct) return direct;
-  }
-  return tx.warehouseRequest.findFirst({
-    where: { mrsNo: po.mrsNo },
-    orderBy: { createdAt: 'asc' },
-    include: { items: true },
-  });
-}
+export type { POChainItem, PODiscrepancyRow } from '@/src/lib/poChain';
 
 /**
  * Authoritative per-item quantity chain, computed from the database inside the
@@ -219,41 +203,6 @@ export async function buildPOChains(
   // caller's transaction so a purchase is capped against the same view the UI saw.
   const allocation = await readMRSAllocationFor(tx, po.mrsNo, po.poNumber);
   return chainFromPO(tx, po, undefined, allocation);
-}
-
-/**
- * The chain for an ALREADY-LOADED purchase order, so bulk callers do not
- * re-fetch the PO they just read. Same math, same result, one code path.
- */
-async function chainFromPO(
-  tx: Tx,
-  po: { poNumber: string; sourceReqNumber: string | null; mrsNo: string; items: { id: string; itemDescription: string; qty: number; unit: string; purchasedQty: number | null; receivedQty: number }[] },
-  knownSource?: { reqNumber: string; items: { itemDescription: string; qty: number; approvedQty: number | null }[] } | null,
-  allocation?: Map<string, number>,
-): Promise<{ chains: POChainItem[]; sourceReqNumber: string | null }> {
-  const source = knownSource !== undefined ? knownSource : await loadSourceRequest(tx, po);
-  const chains: POChainItem[] = po.items.map((item) => {
-    const matched = source ? matchRequestItem(source.items, item.itemDescription) : null;
-    // `approvedQty` is THIS PO's allocated share of the requirement when one is
-    // known, and the whole requirement otherwise. Both come from the server, so
-    // the approved figure, the outstanding balance and the derived stage always
-    // come from one place.
-    const allocated = allocation?.get(normalizeItemDescription(item.itemDescription));
-    const chain = buildPOItemChain({
-      requestedQty: matched ? matched.qty : item.qty,
-      approvedQty:
-        allocated ?? (matched ? (matched.approvedQty ?? matched.qty) : item.qty),
-      purchasedQty: item.purchasedQty,
-      receivedQty: item.receivedQty,
-    });
-    return {
-      ...chain,
-      poItemId: item.id,
-      itemDescription: item.itemDescription,
-      unit: item.unit,
-    };
-  });
-  return { chains, sourceReqNumber: source ? source.reqNumber : null };
 }
 
 export interface POTotals {
@@ -291,6 +240,8 @@ export interface POTracker {
   /** canonical lifecycle derived from the stored status */
   lifecycle: string | null;
   statusLabel: string;
+  /** Supplier's own RR/DR number (from their paperwork), distinct from the PO number. */
+  supplierRrDrNo: string | null;
   items: POChainItem[];
   totals: POTotals;
   /** every line fully purchased — the only time Follow-up Purchase is offered */
@@ -301,6 +252,12 @@ export interface POTracker {
   canComplete: boolean;
   /** true when a purchase has already been recorded (makes this a follow-up) */
   isFollowUp: boolean;
+  /**
+   * Open flags on this PO, so the receiving form can show the checker what has
+   * already been reported instead of offering a second flag on the same line.
+   * Not part of any quantity: nothing below reads it.
+   */
+  discrepancies: PODiscrepancyRow[];
 }
 
 async function buildTrackerTx(tx: Tx, poNumber: string): Promise<POTracker> {
@@ -309,6 +266,10 @@ async function buildTrackerTx(tx: Tx, poNumber: string): Promise<POTracker> {
   const { chains, sourceReqNumber } = await buildPOChains(tx, poNumber);
   const totals = sumTotals(chains);
   const completion = evaluatePOCompletion({ chains });
+  const openFlags = await tx.receivingDiscrepancy.findMany({
+    where: { poNumber, status: RECEIVING_DISCREPANCY_STATUS.OPEN.value },
+    orderBy: { reportedAt: 'asc' },
+  });
   return {
     poNumber,
     sourceReqNumber,
@@ -320,12 +281,14 @@ async function buildTrackerTx(tx: Tx, poNumber: string): Promise<POTracker> {
     status: po.status,
     lifecycle: poLifecycle(po.status),
     statusLabel: poDisplayLabel(po.status),
+    supplierRrDrNo: po.supplierRrDrNo ?? null,
     items: chains,
     totals,
     followUpRequired: totals.procurementOutstanding > 0,
     receivingDue: totals.receivingOutstanding > 0,
     canComplete: completion.canComplete,
     isFollowUp: totals.purchased > 0,
+    discrepancies: openFlags.map(toPODiscrepancyRow),
   };
 }
 
@@ -404,6 +367,16 @@ export interface POWorkload {
   completed: POWorkloadPO[];
   followUp: POWorkloadPO[];
   receivingDue: POWorkloadPO[];
+  /**
+   * Per-material-request roll-up for every MRS the rows above belong to, keyed
+   * by MRS number. Lets a table group its rows under the requirement they
+   * fulfil without a second call, and without summing row quantities itself —
+   * `approved` belongs to the requirement and is counted ONCE, so summing the
+   * POs' own approved shares would be wrong.
+   *
+   * A plain object rather than a Map, because this crosses to the client.
+   */
+  mrsAggregates: Record<string, MRSRequirementTotals>;
 }
 
 export interface POWorkloadPO {
@@ -413,6 +386,9 @@ export interface POWorkloadPO {
   requisitioner: string;
   warehouse: string;
   supplier: string | null;
+  supplierAddress: string | null;
+  /** Supplier's own RR/DR number (from their paperwork), distinct from the PO number. */
+  supplierRrDrNo: string | null;
   status: string;
   statusLabel: string;
   /** canonical lifecycle derived from the stored status */
@@ -425,6 +401,17 @@ export interface POWorkloadPO {
   canComplete: boolean;
   /** only present when collect() ran with includeDiscrepancy */
   hasDiscrepancy?: boolean;
+  /**
+   * The archive flag on its own, kept separate from `hasDiscrepancy`.
+   *
+   * The two have to be distinguishable downstream: the archive flag is PO-level
+   * and unresolvable, so a report showing a discrepancy quantity for one of
+   * those POs has to use the PO's whole balance, while a live flag belongs to one
+   * line and must show that line's balance.
+   */
+  legacyDiscrepancy?: boolean;
+  /** open flags on this PO, after the archive flag has been accounted for */
+  openDiscrepancyCount?: number;
 }
 
 export interface POWorkloadOptions {
@@ -445,6 +432,30 @@ function scopeWhere(user: { role: string; warehouse: string | null }, warehouse?
  * item description. Kept as a single definition so the dashboard and the PO
  * table can never search over different populations.
  */
+/**
+ * Make LIKE metacharacters literal in a search term.
+ *
+ * Prisma's `contains` lowers to SQL `LIKE`/`ILIKE` and passes the pattern through
+ * untouched, so a `%` or `_` typed into a search box is a WILDCARD: searching
+ * `%` matched every row in the database. The Material Requests door matches in
+ * JavaScript with `String.includes()`, where both characters are literal — so the
+ * identical query returned different result sets depending on which report
+ * answered (DB-01).
+ *
+ * PostgreSQL LIKE treats a backslash as its default escape character. Verified
+ * against this project's own client on the disposable PostgreSQL 16.15:
+ * `contains('\%')` and `contains('\_')` each returned only the row that genuinely
+ * held that character, while the unescaped forms returned everything. The
+ * backslash is escaped first so a literal backslash in the term survives too.
+ *
+ * Only the pattern is rewritten — the value stays a bound parameter and the
+ * `where` shape is untouched, so there is no injection surface and the warehouse
+ * scope in `scopeWhere` still applies.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 function buildWorkloadWhere(
   user: { role: string; warehouse: string | null },
   search: string | undefined,
@@ -453,10 +464,13 @@ function buildWorkloadWhere(
   const base = scopeWhere(user, warehouse);
   const or: Record<string, unknown>[] = [];
   if (search?.trim()) {
-    const q = search.trim();
+    // Escaped here, once, for every arm below — so the four searchable fields
+    // cannot drift apart in how they treat a metacharacter.
+    const q = escapeLikePattern(search.trim());
     or.push({ poNumber: { contains: q, mode: 'insensitive' } });
     or.push({ mrsNo: { contains: q, mode: 'insensitive' } });
     or.push({ supplier: { contains: q, mode: 'insensitive' } });
+    or.push({ supplierRrDrNo: { contains: q, mode: 'insensitive' } });
     or.push({ items: { some: { itemDescription: { contains: q, mode: 'insensitive' } } } });
   }
   return or.length ? { ...base, OR: or } : base;
@@ -490,14 +504,24 @@ async function collect(
 ): Promise<{
   rows: POWorkloadPO[];
   truncated: boolean;
+  /**
+   * The per-MRS roll-up for every MRS these rows belong to, keyed by MRS number.
+   *
+   * Free: readMRSData() below already builds them in order to price each PO's
+   * allocated share, and they were being discarded. Carried out so a caller can
+   * group rows by material request without a second read.
+   */
+  aggregates: Map<string, MRSAggregate>;
   /** the same DB rows, unprojected, for callers that need extra columns */
   raw: Array<{
     poNumber: string;
     mrsNo: string;
     poType: string | null;
-    status: string;
-    supplierAddress: string | null;
-    sourceReqNumber: string | null;
+     status: string;
+     supplier: string | null;
+     supplierAddress: string | null;
+     supplierRrDrNo: string | null;
+     sourceReqNumber: string | null;
     pickupBy: string | null;
     approvedBy: string | null;
     listedBy: string | null;
@@ -548,7 +572,37 @@ async function collect(
   // priced against the slice of the requirement IT is responsible for buying.
   // Re-reads every purchase order on those MRSs, so a sibling that is filtered
   // out or sitting on another page still counts.
-  const { allocations } = await readMRSData(tx, mrsNumbers);
+  //
+  // The same call also returns each MRS's roll-up. Only the allocations were
+  // wanted here, so the aggregates were thrown away; they are carried out now
+  // because re-reading them later would cost two more queries for figures this
+  // call has already paid for.
+  const { allocations, aggregates } = await readMRSData(tx, mrsNumbers);
+
+  // One batched read of the live open flags for this page. Per PO and per ITEM,
+  // because a discrepancy belongs to one line: fifty bags of cement arriving
+  // intact and fifty boxes of nails arriving damaged are one purchase order but
+  // two physical checks, and only the nails are discrepant. Gated by the same
+  // opt-in as the archive read so getPOWorkload()'s payload is unchanged.
+  const openByPo = new Map<string, PODiscrepancyRow[]>();
+  const openByPoItem = new Map<string, PODiscrepancyRow>();
+  if (options.includeDiscrepancy) {
+    const open = await tx.receivingDiscrepancy.findMany({
+      where: {
+        poNumber: { in: page.map((p) => p.poNumber) },
+        status: RECEIVING_DISCREPANCY_STATUS.OPEN.value,
+      },
+      orderBy: { reportedAt: 'asc' },
+    });
+    for (const d of open) {
+      const key = discrepancyKey(d.poNumber, d.poItemId);
+      if (!openByPo.has(d.poNumber)) openByPo.set(d.poNumber, []);
+      openByPo.get(d.poNumber)!.push(toPODiscrepancyRow(d));
+      // A line can only carry one open flag at a time — recordReceiving refuses
+      // a second — so the earliest is the one that matters.
+      if (!openByPoItem.has(key)) openByPoItem.set(key, toPODiscrepancyRow(d));
+    }
+  }
 
   const rows: POWorkloadPO[] = [];
   for (const po of page) {
@@ -559,7 +613,22 @@ async function collect(
         )
       : undefined;
     const { chains } = await chainFromPO(tx, po, resolveSource(po), allocation);
-    const totals = sumTotals(chains);
+    const openForPo = openByPo.get(po.poNumber);
+    // Decorate the item rows so a list can point at the exact line that was
+    // flagged, rather than making the reader infer it from a PO-level count.
+    const decorated = chains.map((c) => ({
+      ...c,
+      openDiscrepancy: options.includeDiscrepancy
+        ? openByPoItem.get(discrepancyKey(po.poNumber, c.poItemId)) ?? null
+        : null,
+    }));
+    const totals = sumTotals(decorated);
+    // The archive flag, kept verbatim so historical POs report as they always
+    // have, OR-ed with the live open rows. See isDiscrepancyPO().
+    const legacyDiscrepancy = hasReceivingDiscrepancy({
+      poType: po.poType,
+      deliveries: po.deliveries ?? [],
+    });
     rows.push({
       poNumber: po.poNumber,
       date: po.date,
@@ -567,28 +636,33 @@ async function collect(
       requisitioner: po.requisitioner,
       warehouse: po.warehouse,
       supplier: po.supplier,
+      supplierAddress: po.supplierAddress,
+      supplierRrDrNo: po.supplierRrDrNo ?? null,
       status: po.status,
       statusLabel: poDisplayLabel(po.status),
       lifecycle: poLifecycle(po.status),
-      itemLines: chains,
+      itemLines: decorated,
       totals,
       followUpRequired: totals.procurementOutstanding > 0,
       receivingDue: totals.receivingOutstanding > 0,
-      canComplete: evaluatePOCompletion({ chains }).canComplete,
+      canComplete: evaluatePOCompletion({ chains: decorated }).canComplete,
       // The EXISTING receiving-discrepancy rule, applied to the archived
-      // shipment rows rather than re-expressed here. Absent unless the caller
-      // opted in, so getPOWorkload()'s payload is unchanged.
+      // shipment rows rather than re-expressed here, unioned with the live
+      // records. Absent unless the caller opted in, so getPOWorkload()'s payload
+      // is unchanged.
       ...(options.includeDiscrepancy
         ? {
-            hasDiscrepancy: hasReceivingDiscrepancy({
-              poType: po.poType,
-              deliveries: po.deliveries ?? [],
+            hasDiscrepancy: isDiscrepancyPO({
+              legacyFlagged: legacyDiscrepancy,
+              openDiscrepancies: openForPo?.length ?? 0,
             }),
+            legacyDiscrepancy,
+            openDiscrepancyCount: openForPo?.length ?? 0,
           }
         : {}),
     });
   }
-  return { rows, truncated, raw: page };
+  return { rows, truncated, aggregates, raw: page };
 }
 
 /**
@@ -619,7 +693,7 @@ export async function getPOWorkload(options: POWorkloadOptions = {}): Promise<PO
   ]);
 
   // Quantity-driven buckets need the chain, so they are priced from the scan.
-  const { rows: all, truncated } = await collect(prisma, withSearch, WORKLOAD_SCAN_LIMIT);
+  const { rows: all, truncated, aggregates } = await collect(prisma, withSearch, WORKLOAD_SCAN_LIMIT);
   if (truncated) {
     console.warn(
       `getPOWorkload: scan limit of ${WORKLOAD_SCAN_LIMIT} purchase orders reached; ` +
@@ -628,6 +702,11 @@ export async function getPOWorkload(options: POWorkloadOptions = {}): Promise<PO
   }
 
   const byLifecycle = (state: string) => (p: POWorkloadPO) => p.lifecycle === state;
+
+  // Grouping context, priced by the same read that priced the rows. Covers every
+  // MRS in the scan, so switching section or presentation needs no refetch.
+  const mrsAggregates: Record<string, MRSRequirementTotals> = {};
+  for (const [mrsNo, aggregate] of aggregates) mrsAggregates[mrsNo] = mrsTotalsOf(aggregate);
 
   return {
     totalPOs,
@@ -644,6 +723,7 @@ export async function getPOWorkload(options: POWorkloadOptions = {}): Promise<PO
     completed: all.filter(byLifecycle(PO_STATUS.COMPLETED.value)),
     followUp: all.filter((p) => p.followUpRequired),
     receivingDue: all.filter((p) => p.receivingDue),
+    mrsAggregates,
   };
 }
 
@@ -685,6 +765,13 @@ export interface POBucketPageOptions {
 /** A table row: the canonical workload row plus what the expanded PO shows. */
 export interface POBucketPageRow extends POWorkloadPO {
   hasDiscrepancy: boolean;
+  /**
+   * Open flags on this PO. Required here rather than optional because every
+   * purchaser-facing scan opts into the discrepancy read, and a row with no flag
+   * legitimately has zero. A count rather than a boolean so the Discrepancies
+   * section can say how many lines are waiting on the purchaser.
+   */
+  openDiscrepancyCount: number;
   bucket: POBucket;
   /** quantity-derived stage; the In Progress sub-filter matches on this */
   progressStage: POProgressStatus;
@@ -746,7 +833,14 @@ export interface ClassifiedPO {
   cancelled: boolean;
   bucket: POBucket;
   progressStage: POProgressStatus;
+  /** archive flag OR any open live record — what puts a PO in Discrepancies */
   hasDiscrepancy: boolean;
+  /**
+   * The archive flag alone. A report has to tell the two apart to size a
+   * discrepancy quantity correctly: an archive flag is a PO-level verdict on the
+   * whole order, whereas a live flag names one line.
+   */
+  legacyDiscrepancy: boolean;
 }
 
 /**
@@ -772,6 +866,7 @@ function classifyRows(rows: POWorkloadPO[]): { classified: ClassifiedPO[]; count
     }),
     progressStage: derivePOProgressStatus(row.itemLines),
     hasDiscrepancy: row.hasDiscrepancy === true,
+    legacyDiscrepancy: row.legacyDiscrepancy === true,
   }));
 
   const counts: Record<POBucketKey, number> = {
@@ -823,6 +918,7 @@ function toBucketPageRow(
   return {
     ...c.row,
     hasDiscrepancy: c.row.hasDiscrepancy === true,
+    openDiscrepancyCount: c.row.openDiscrepancyCount ?? 0,
     bucket: c.bucket,
     progressStage: c.progressStage,
     supplierAddress: extra?.supplierAddress ?? null,
@@ -1078,9 +1174,35 @@ export interface ReportItemRow {
   itemStatus: POProgressStatus;
   itemStatusLabel: string;
   /** existing exception semantics; a plain receiving gap does NOT set this */
+  /** archive flag OR this PO has an open line discrepancy — a PO-level verdict */
   hasDiscrepancy: boolean;
-  /** the receiving gap, but ONLY on a PO already flagged as a discrepancy */
+  /**
+   * The archive flag on its own, on this row.
+   *
+   * Separate from `hasDiscrepancy` because that one became PO-level once live
+   * item flags existed: it says the order has a problem somewhere. The report has
+   * to know whether THIS row is the problem, or a PO with one damaged line would
+   * pull its healthy lines into the Discrepancy Report alongside it.
+   */
+  legacyDiscrepancy: boolean;
+  /**
+   * The receiving gap, but ONLY on a row that is actually a discrepancy.
+   *
+   * Sized per SOURCE, because the two sources are different kinds of claim. The
+   * archive flag is a PO-level verdict on the whole order and predates
+   * item-level tracking, so it has always shown the PO's whole balance on every
+   * row. A live flag names one line and shows only that line's balance — showing
+   * the PO total for a one-box problem would overstate the exception.
+   */
   qtyDiscrepancy: number;
+  /**
+   * This line's discrepancy, open or resolved, or null.
+   *
+   * Resolved rows are carried too: the Discrepancy Report is the record of what
+   * was flagged and what became of it, so dropping resolved rows would leave no
+   * way to see that a problem was ever raised.
+   */
+  discrepancy: PODiscrepancyRow | null;
   requestedBy: string | null;
   approvedBy: string | null;
   purchasedBy: string | null;
@@ -1160,6 +1282,7 @@ function flattenPoItems(
   raw: RawPOAttribution[],
   receiving: Map<string, { actor: string | null; at: Date | null }>,
   requests: Map<string, { requestedBy: string; date: string }>,
+  discrepancies: Map<string, PODiscrepancyRow[]> = new Map(),
 ): ReportItemRow[] {
   const extraByPo = new Map(raw.map((r) => [r.poNumber, r]));
   const out: ReportItemRow[] = [];
@@ -1168,10 +1291,19 @@ function flattenPoItems(
     const extra = extraByPo.get(po.poNumber);
     const recv = receiving.get(po.poNumber);
     const request = requests.get(po.poNumber);
-    // A PO with no flag has no discrepancy quantity even when units are
-    // outstanding: that is legitimate work, not an exception.
-    const qtyDiscrepancy = c.hasDiscrepancy ? po.totals.receivingOutstanding : 0;
     for (const item of po.itemLines) {
+      // The open flag collect() already attached to this line, falling back to
+      // the full history for a PO whose only flags are resolved.
+      const allForPo = discrepancies.get(po.poNumber) ?? [];
+      const discrepancy =
+        item.openDiscrepancy ?? allForPo.find((d) => d.poItemId === item.poItemId) ?? null;
+      // A PO with no flag has no discrepancy quantity even when units are
+      // outstanding: that is legitimate work, not an exception.
+      const qtyDiscrepancy = c.legacyDiscrepancy
+        ? po.totals.receivingOutstanding
+        : discrepancy && discrepancy.status === RECEIVING_DISCREPANCY_STATUS.OPEN.value
+          ? item.receivingOutstanding
+          : 0;
       const stage = deriveItemProgressStatus(item);
       out.push({
         poNumber: po.poNumber,
@@ -1193,7 +1325,9 @@ function flattenPoItems(
         itemStatus: stage,
         itemStatusLabel: PO_PROGRESS_LABEL[stage],
         hasDiscrepancy: c.hasDiscrepancy,
+        legacyDiscrepancy: c.legacyDiscrepancy,
         qtyDiscrepancy,
+        discrepancy,
         requestedBy: request?.requestedBy ?? null,
         approvedBy: extra?.approvedBy ?? null,
         purchasedBy: extra?.purchaseConfirmedBy ?? null,
@@ -1410,6 +1544,9 @@ async function materialRequestRows(
         receivingOutstanding: chain?.receivingOutstanding ?? 0,
         itemStatus: stage,
         itemStatusLabel: stage ? PO_PROGRESS_LABEL[stage] : 'Not yet raised',
+        // A receiving discrepancy belongs to a PO ITEM, and this row is the
+        // request line. Reading the PO it was raised on would put the same flag
+        // on the request and on the PO, which is one exception counted twice.
         hasDiscrepancy: false,
         qtyDiscrepancy: 0,
         purchasedBy: po?.purchaseConfirmedBy ?? null,
@@ -1454,14 +1591,44 @@ export async function getReportRows(options: ReportRowsOptions): Promise<ReportR
   if (report === 'material_requests') {
     const rows = await materialRequestRows(user, warehouse);
     const q = options?.search?.trim().toLowerCase();
-    const filtered = q
-      ? rows.filter((r) =>
+      // No LIKE escaping here, and deliberately: this door matches with
+      // String.includes(), where '%' and '_' are ordinary literal characters —
+      // which is exactly the contract escapeLikePattern() gives the PO doors.
+      // Escaping on this side would reintroduce the DB-01 divergence.
+    // WHOLE-REQUEST matching, mirroring the PO reports. A search term selects a
+    // REQUEST, and every item line of that request is kept — not only the lines
+    // that match the term. This is what makes both report doors answer the same
+    // question: a PO report filters at PO level (`items: { some: … }` selects the
+    // order) and expands every item of a matched order, so a term on one line
+    // brought back its siblings. Filtering these rows individually made
+    // "plywood" return 2 rows on a PO report and 1 on a request report (P6-02).
+    //
+    // The searchable fields are unchanged — the SAME per-row haystack is tested,
+    // including the joined PO number and supplier, which are properties of the
+    // request's purchase order rather than of an individual line. That matters:
+    // a term matching a request's PO number or supplier must still select that
+    // whole request, and testing rows individually already satisfied it because
+    // those fields are repeated on every one of its rows. Grouping the matches by
+    // reqNumber therefore keeps that behaviour and extends it to item lines.
+    //
+    // Grouping cannot leak across requests (a reqNumber identifies exactly one
+    // request) and cannot leak across warehouses, because `materialRequestRows`
+    // has already scoped `rows` to the caller's warehouse before this runs.
+    let filtered = rows;
+    if (q) {
+      const matchedReqNumbers = new Set<string>();
+      for (const r of rows) {
+        if (
           [r.reqNumber, r.mrsNo, r.itemDescription, r.requestedBy, r.poNumber ?? '', r.supplier ?? '']
             .join(' ')
             .toLowerCase()
-            .includes(q),
-        )
-      : rows;
+            .includes(q)
+        ) {
+          matchedReqNumbers.add(r.reqNumber);
+        }
+      }
+      filtered = rows.filter((r) => matchedReqNumbers.has(r.reqNumber));
+    }
     return { report, rows: filtered, total: filtered.length, truncated: false };
   }
 
@@ -1476,15 +1643,40 @@ export async function getReportRows(options: ReportRowsOptions): Promise<ReportR
     prisma,
     raw.map((r) => ({ poNumber: r.poNumber, sourceReqNumber: r.sourceReqNumber, mrsNo: r.mrsNo })),
   );
+  // Every discrepancy on these POs, OPEN AND RESOLVED. The resolved ones matter
+  // because a report whose columns include Resolved By / Resolved Date /
+  // Resolution has nothing to show if resolved rows are filtered out — and the
+  // history of what was reported is the point of the report, not a side effect
+  // of it. collect() only attached the open flags to the item rows, so this read
+  // is also what lets a PO whose flags are all resolved still appear here.
+  const discrepancyRows = await prisma.receivingDiscrepancy.findMany({
+    where: { poNumber: { in: classified.map((c) => c.row.poNumber) } },
+  });
+  const discrepanciesByPo = new Map<string, PODiscrepancyRow[]>();
+  for (const d of discrepancyRows) {
+    const list = discrepanciesByPo.get(d.poNumber) ?? [];
+    list.push(toPODiscrepancyRow(d));
+    discrepanciesByPo.set(d.poNumber, list);
+  }
   // flattenPoItems() already populates every accountability field from the raw
   // PO row (approvedBy, purchaseConfirmedBy, purchaseConfirmedAt) and from the
   // requester lookup, so no second pass over the rows is needed here.
-  let items = flattenPoItems(classified, raw, attribution, requests);
+  let items = flattenPoItems(classified, raw, attribution, requests, discrepanciesByPo);
 
   if (report === 'discrepancy') {
-    // Flagged POs only, per the existing definition. An unflagged PO with an
-    // outstanding balance is legitimate work and never appears here.
-    items = items.filter((i) => i.hasDiscrepancy);
+    // Flagged ROWS only, and that word matters. `hasDiscrepancy` is a PO-level
+    // verdict, so filtering on it would drag every line of a PO onto the report
+    // because of one damaged line — which is the exact opposite of what a
+    // discrepancy is. A row qualifies on either source:
+    //
+    //   legacyDiscrepancy   the archive flag is itself a whole-order verdict, so
+    //                       every row of a flagged PO stays in, exactly as before
+    //   discrepancy         a live record, which names one line
+    //
+    // An unflagged PO with an outstanding balance never qualifies. That
+    // distinction is the whole reason this report is not simply "everything still
+    // to receive".
+    items = items.filter((i) => i.legacyDiscrepancy || i.discrepancy !== null);
   }
 
   return { report, rows: items, total: items.length, truncated };
@@ -1514,11 +1706,26 @@ export async function savePurchase(input: {
   supplier: string;
   supplierAddress?: string;
   remarks?: string;
+  /** Supplier's own RR/DR number, transcribed from their paperwork. */
+  supplierRrDrNo?: string;
 }) {
   const user = await assertCanManagePOs();
   const parsed = savePurchaseSchema.parse(input);
   return runTx(async (tx) => {
-    await lockPO(tx, parsed.poNumber);
+    // The MRS-wide lock, not lockPO. The purchase below is capped against this
+    // PO's share of the requirement, a figure derived from every PO on the MRS,
+    // and the write moves those shares for every one of them. Locking only this
+    // row left two concurrent purchases on two POs of one requirement free to
+    // read the same stale remainder. lockMRS subsumes lockPO — it locks this row
+    // too — and it is the same lock createFollowUpPO already takes, so both
+    // purchase doors serialize identically.
+    const pinned = await tx.purchaseOrder.findUnique({
+      where: { poNumber: parsed.poNumber },
+      select: { mrsNo: true },
+    });
+    if (!pinned) throw new Error('Purchase order not found');
+    await lockMRS(tx, pinned.mrsNo);
+    // Re-read after the lock: anything read before it may already be stale.
     const po = await tx.purchaseOrder.findUnique({
       where: { poNumber: parsed.poNumber },
       include: { items: true },
@@ -1588,6 +1795,7 @@ export async function savePurchase(input: {
       data: {
         supplier,
         supplierAddress,
+        supplierRrDrNo: parsed.supplierRrDrNo?.trim() || null,
         // The first purchase moves the PO off AWAITING_PURCHASE. Any further
         // purchasing happens on a NEW PO, so this status is written once here.
         status: PO_STATUS.IN_PROGRESS.value,
@@ -1618,15 +1826,238 @@ export async function savePurchase(input: {
         actor: user.username,
       });
     }
+    // Record the supplier RR/DR reference when it is first provided or changed.
+    // An empty/whitespace value clears it; the audit line captures the move so the
+    // change is visible in PO history even when quantities did not change.
+    const prevRef = po.supplierRrDrNo ?? null;
+    const nextRef = parsed.supplierRrDrNo?.trim() || null;
+    if (prevRef !== nextRef) {
+      await audit(tx, {
+        poNumber: po.poNumber,
+        action: prevRef ? 'supplier_rr_dr_changed' : 'supplier_rr_dr_set',
+        detail: `${prevRef ?? '(none)'} -> ${nextRef ?? '(none)'}`,
+        actor: user.username,
+      });
+    }
+
+    // A purchase recorded here re-divides the requirement, so it can leave a
+    // SIBLING with nothing left to buy and everything already received — complete,
+    // with no write of its own to trigger the check. Re-evaluate the whole
+    // requirement, not just the PO this action was called with.
+    await reconcileMRSCompletion(tx, po.mrsNo, user.username);
 
     return { po: updated, tracker: await buildTrackerTx(tx, parsed.poNumber) };
   });
 }
 
 // ---------------------------------------------------------------------------
+// Supplier RR/DR reference — a narrow, auditable edit outside the purchase.
+//
+// A PO is one purchasing transaction with one supplier, and Save Purchase is the
+// only place that transaction is written. But the supplier's RR/DR number is
+// often not known (or not yet legible) when the purchase is saved, so it must be
+// editable afterwards. This action is deliberately narrow — it writes ONLY the
+// reference, never the supplier, quantities, items, or status — so a PO that is
+// purchased or even completed can still gain its supplier document reference.
+//
+// Admin/Superadmin only: Warehouse users never set supplier paperwork references.
+// ---------------------------------------------------------------------------
+
+export async function updateSupplierRrDrNo(input: unknown) {
+  const parsed = updateSupplierRrDrNoSchema.parse(input);
+  const user = await assertCanManagePOs();
+  return runTx(async (tx) => {
+    await lockPO(tx, parsed.poNumber);
+    const po = await tx.purchaseOrder.findUnique({ where: { poNumber: parsed.poNumber } });
+    if (!po) throw new Error('Purchase order not found');
+
+    const nextRef = parsed.supplierRrDrNo?.trim() || null;
+    const prevRef = po.supplierRrDrNo ?? null;
+    if (prevRef === nextRef) return { po, changed: false };
+
+    const updated = await tx.purchaseOrder.update({
+      where: { poNumber: parsed.poNumber },
+      data: { supplierRrDrNo: nextRef },
+    });
+    await audit(tx, {
+      poNumber: parsed.poNumber,
+      action: prevRef ? 'supplier_rr_dr_changed' : 'supplier_rr_dr_set',
+      detail: `${prevRef ?? '(none)'} -> ${nextRef ?? '(none)'}`,
+      actor: user.username,
+    });
+    return { po: updated, changed: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Printable Receiving Report (Warehouse, completed POs)
+//
+// A read-only snapshot assembled from the existing PO, item, receiving-history,
+// audit and discrepancy records. No write path is involved: viewing or printing
+// the report never mutates the PO, never creates a Receipt, and never changes
+// audit history. Authorization is identical to getPOTracker()/getReceivingHistory():
+// the owning warehouse or any purchaser/admin.
+// ---------------------------------------------------------------------------
+
+export interface ReceivingReportItem {
+  itemDescription: string
+  unit: string
+  purchasedQty: number
+  receivedQty: number
+}
+
+export interface ReceivingReportEvent {
+  eventId: string
+  createdAt: string
+  actor: string | null
+  lines: { itemDescription: string; unit: string; fromQty: number; toQty: number; delta: number }[]
+}
+
+export interface ReceivingReportRemark {
+  detail: string
+  createdAt: string
+  actor: string | null
+}
+
+export interface ReceivingReportDiscrepancy {
+  itemDescription: string
+  unit: string
+  discrepancyType: string
+  remarks: string | null
+  status: string
+  reportedBy: string
+  reportedAt: string
+  resolvedBy: string | null
+  resolvedAt: string | null
+  resolution: string | null
+}
+
+export interface ReceivingReportPO {
+  poNumber: string
+  date: string
+  mrsNo: string
+  supplier: string | null
+  supplierAddress: string | null
+  supplierRrDrNo: string | null
+  warehouse: string
+  requisitioner: string
+  approvedBy: string | null
+  poExpDate: string | null
+  statusLabel: string
+}
+
+export interface ReceivingReport {
+  po: ReceivingReportPO
+  items: ReceivingReportItem[]
+  /** Newest receiving event first (matches getReceivingHistory ordering). */
+  receivingEvents: ReceivingReportEvent[]
+  discrepancies: ReceivingReportDiscrepancy[]
+  receivingRemarks: ReceivingReportRemark[]
+}
+
+/**
+ * Upper bound on the remarks section of a single-PO report snapshot.
+ *
+ * A named constant rather than an inline literal: the reports.test.ts guard
+ * forbids `take: <digits>` anywhere after getReportRows so a multi-PO report
+ * can never silently cap its rows again, and an inline literal here would trip
+ * that heuristic even though this bounds remarks on ONE purchase order, not
+ * report rows.
+ */
+const RECEIVING_REPORT_REMARKS_LIMIT = 25;
+
+/**
+ * Read-only report data for one purchase order.
+ *
+ * Re-uses getReceivingHistory() and getPODiscrepancies() so the report renders
+ * the SAME history and discrepancies the PO screen shows — no second matching
+ * algorithm to drift from the UI. All three helpers re-read the PO internally,
+ * so the authorization check below is what gates the report even though the
+ * nested calls repeat it.
+ */
+export async function getReceivingReport(poNumber: string): Promise<ReceivingReport> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { poNumber },
+    select: { warehouse: true },
+  });
+  if (!po) throw new Error('Purchase order not found');
+  if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+
+  const full = await prisma.purchaseOrder.findUnique({
+    where: { poNumber },
+    include: { items: true },
+  });
+  if (!full) throw new Error('Purchase order not found');
+
+  const [history, discrepancies, remarks] = await Promise.all([
+    getReceivingHistory(poNumber),
+    getPODiscrepancies(poNumber),
+    prisma.deliveryAuditLog.findMany({
+      where: { poNumber, action: 'receiving_remarks' },
+      orderBy: { createdAt: 'desc' },
+      take: RECEIVING_REPORT_REMARKS_LIMIT,
+    }),
+  ]);
+
+  return {
+    po: {
+      poNumber: full.poNumber,
+      date: full.date,
+      mrsNo: full.mrsNo,
+      supplier: full.supplier,
+      supplierAddress: full.supplierAddress,
+      supplierRrDrNo: full.supplierRrDrNo,
+      warehouse: full.warehouse,
+      requisitioner: full.requisitioner,
+      approvedBy: full.approvedBy,
+      poExpDate: full.poExpDate,
+      statusLabel: poDisplayLabel(full.status),
+    },
+    items: full.items.map((i) => ({
+      itemDescription: i.itemDescription,
+      unit: i.unit,
+      purchasedQty: i.purchasedQty ?? 0,
+      receivedQty: i.receivedQty,
+    })),
+    receivingEvents: history.map((e) => ({
+      eventId: e.eventId,
+      createdAt: e.createdAt,
+      actor: e.actor,
+      lines: e.lines.map((l) => ({
+        itemDescription: l.itemDescription,
+        unit: l.unit,
+        fromQty: l.fromQty,
+        toQty: l.toQty,
+        delta: l.delta,
+      })),
+    })),
+    discrepancies: discrepancies.map((d) => ({
+      itemDescription: d.itemDescription,
+      unit: d.unit,
+      discrepancyType: d.discrepancyType,
+      remarks: d.remarks ?? null,
+      status: d.status,
+      reportedBy: d.reportedBy,
+      reportedAt: d.reportedAt,
+      resolvedBy: d.resolvedBy,
+      resolvedAt: d.resolvedAt,
+      resolution: d.resolution,
+    })),
+    receivingRemarks: remarks.map((r) => ({
+      detail: r.detail ?? '',
+      createdAt: r.createdAt.toISOString(),
+      actor: r.actor,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Follow-up Purchase: a NEW purchase order on the SAME material request.
 //
 // The business rule this enforces is that one MRS is one requirement and one PO
+// is one purchasing transaction with one supplier. So buying more never amends
 // is one purchasing transaction with one supplier. So buying more never amends
 // the PO that was already bought from — it raises another PO against the same
 // requirement, carrying a possibly different supplier. That holds whether the
@@ -1661,16 +2092,32 @@ export async function createFollowUpPO(input: {
     //    concurrent follow-up on a sibling PO cannot claim the same remainder.
     await lockMRS(tx, original.mrsNo);
 
-    // 3. Recompute the MRS aggregate from current data inside this transaction.
-    const aggregate = (await readMRSAggregates(tx, [original.mrsNo])).get(original.mrsNo)!;
+    // 3. Recompute the MRS from current data inside this transaction, and take
+    //    the per-line room from the SAME reservation helper the direct
+    //    PO-creation paths use (actions/pos.ts assertWithinMRSAllowance). One
+    //    basis, three doors: the requirement is divided one way or not at all.
+    //
+    //    Previously this read `approved - purchased`, which ignored a follow-up
+    //    that had been raised but not yet bought. Two follow-ups could therefore
+    //    each claim the same remainder and leave the second with an allocation of
+    //    zero — a live order that could never be purchased.
+    const data = await readMRSData(tx, [original.mrsNo]);
+    const aggregate = data.aggregates.get(original.mrsNo)!;
     const totals = mrsTotalsOf(aggregate);
-    const itemAllowance = mrsItemAllowanceOf(aggregate);
+    const itemAllowance = mrsRoomForNewPO(data, original.mrsNo);
 
-    // 4. The allowance is the PROCUREMENT shortfall only. Units already bought
-    //    but not yet arrived are receiving work and must never be re-buyable.
-    if (totals.procurementOutstanding <= 0)
+    // 4. Whole-MRS guard, read from the SAME room figure the per-line check uses
+    //    below, so the two cannot disagree. The previous condition was
+    //    `procurementOutstanding <= 0` (approved - purchased), which stayed
+    //    positive while an already-raised follow-up still held the remainder.
+    //
+    //    Units bought but not yet arrived are receiving work, not procurement
+    //    work: `mrsRoomForNewPO` counts a PO's purchase as its whole commitment,
+    //    so bought units are never re-buyable here either.
+    const totalRoom = [...itemAllowance.values()].reduce((sum, l) => sum + l.remaining, 0);
+    if (totalRoom <= 0)
       throw new Error(
-        `Nothing left to purchase on ${original.mrsNo} — every approved unit has already been purchased.`,
+        `Nothing left to purchase on ${original.mrsNo} — every approved unit has already been claimed by an existing purchase order.`,
       );
 
     // 5. A new PO needs its own number, distinct from the one it follows.
@@ -1763,6 +2210,16 @@ export async function createFollowUpPO(input: {
       actor: user.username,
     });
 
+    // Raising the follow-up is itself a purchase-side event. The new PO commits
+    // its line quantity, and because pass 2 of `allocateForMRS` hands the leftover
+    // to the NEWEST PO, that commit comes straight out of its siblings' shares —
+    // possibly leaving one with nothing left to buy and everything received. The
+    // sibling is finished with no write of its own to notice, so it is settled
+    // here rather than waiting for a purchase that will never come: raising a
+    // follow-up for a remainder the sibling already covers is exactly what
+    // completes it.
+    await reconcileMRSCompletion(tx, original.mrsNo, user.username);
+
     return { po: created, mrsNo: original.mrsNo };
   });
 }
@@ -1774,7 +2231,12 @@ export interface MRSFollowUpItem {
   approvedQty: number;
   /** what all of this MRS's purchase orders have already bought */
   purchasedAcrossPOs: number;
-  /** the only quantity this follow-up may claim */
+  /**
+   * The only quantity this follow-up may claim: `approved - committed` across all
+   * of this MRS's purchase orders, where a PO that has bought nothing yet commits
+   * its line quantity. Read with `mrsRoomForNewPO`, the same basis `createFollowUpPO`
+   * accepts, so the form and the guard cannot disagree.
+   */
   remaining: number;
 }
 
@@ -1789,7 +2251,7 @@ export interface MRSFollowUpContext {
   poExpDate: string | null;
   items: MRSFollowUpItem[];
   totalRemaining: number;
-  /** true when the requirement is fully purchased; the form must not submit */
+  /** true when every approved unit is already committed to a PO; the form must not submit */
   blocked: boolean;
 }
 
@@ -1810,13 +2272,24 @@ export async function getMRSFollowUpContext(input: { originalPoNumber: string })
     if (!original) throw new Error('Purchase order not found');
     if (poLifecycle(original.status) === PO_STATUS.CANCELLED.value)
       throw new Error('This purchase order is cancelled');
-    const aggregate = (await readMRSAggregates(tx, [original.mrsNo])).get(original.mrsNo)!;
+    // The per-line room comes from `mrsRoomForNewPO`, the SAME reservation basis
+    // `createFollowUpPO` accepts, not from the aggregate's `procurementOutstanding`.
+    //
+    // This read used `approved - purchased`, which a PO that was RAISED but never
+    // bought does not advance: such a PO commits its line qty on the server while
+    // consuming nothing here. The form then offered a remainder the server would
+    // refuse, and the purchaser's only symptom was a rejection on submit. Reading
+    // the room off `readMRSData` also brings the `pos` rows the walk needs, which
+    // `readMRSAggregates` discards.
+    const data = await readMRSData(tx, [original.mrsNo]);
+    const aggregate = data.aggregates.get(original.mrsNo)!;
+    const allowance = mrsRoomForNewPO(data, original.mrsNo);
     const items: MRSFollowUpItem[] = aggregate.lines.map((l) => ({
       itemDescription: l.itemDescription,
       unit: l.unit,
       approvedQty: l.approvedQty,
       purchasedAcrossPOs: l.purchasedQty,
-      remaining: l.procurementOutstanding,
+      remaining: allowance.get(normalizeItemDescription(l.itemDescription))?.remaining ?? 0,
     }));
     return {
       mrsNo: original.mrsNo,
@@ -1827,8 +2300,11 @@ export async function getMRSFollowUpContext(input: { originalPoNumber: string })
       approvedBy: original.approvedBy,
       poExpDate: original.poExpDate,
       items,
-      totalRemaining: aggregate.totals.procurementOutstanding,
-      blocked: aggregate.totals.procurementOutstanding <= 0,
+      // Summed from the same per-line room, mirroring the `totalRoom` guard in
+      // createFollowUpPO, so the form can never be blocked in one basis and
+      // submittable in another.
+      totalRemaining: items.reduce((sum, i) => sum + i.remaining, 0),
+      blocked: items.every((i) => i.remaining <= 0),
     } satisfies MRSFollowUpContext;
   });
 }
@@ -1917,11 +2393,31 @@ export async function getMRSProgress(mrsNumbers: string[]): Promise<MRSProgressR
 // physically arrived against the PO, cumulatively, so one PO can have many
 // receiving events. Each event is written to the audit log, which is what
 // preserves "8 now, 2 later" as two events on one PO.
+//
+// A line may also carry a `discrepancy`, which is the ONLY way a discrepancy is
+// ever created. It means the checker found an actual problem with what was
+// delivered — damaged, wrong item, wrong size, missing — and is optional on every
+// line, because a short delivery with nothing wrong is ordinary receiving
+// outstanding and stays that way.
+//
+// A discrepancy adds no quantity of its own. The checker states the acceptable
+// count in `receivedQty` exactly as before; "50 purchased, 1 damaged" is recorded
+// as 49 received plus a Damaged Item report, never as 50 received plus a
+// damagedQty. The canonical chain is untouched.
 // ---------------------------------------------------------------------------
 
 export async function recordReceiving(input: {
   poNumber: string;
-  items: { poItemId: string; receivedQty: number }[];
+  items: {
+    poItemId: string;
+    receivedQty: number;
+    /**
+     * Optional. Present ONLY when the checker actively reports a problem with
+     * this line — it is never inferred from purchasedQty > receivedQty, because
+     * an ordinary short delivery is receiving outstanding and nothing else.
+     */
+    discrepancy?: { type: string; remarks?: string };
+  }[];
   remarks?: string;
 }) {
   const parsed = recordReceivingSchema.parse(input);
@@ -1937,12 +2433,24 @@ export async function recordReceiving(input: {
     if (lifecycle === PO_STATUS.CANCELLED.value)
       throw new Error('This purchase order is cancelled');
 
-    const inputMap = new Map(parsed.items.map((i) => [i.poItemId, i.receivedQty]));
+    // The whole entry, not just the quantity: the per-line discrepancy rides
+    // along with it.
+    const inputMap = new Map(parsed.items.map((i) => [i.poItemId, i]));
     const knownIds = new Set(po.items.map((i) => i.id));
     for (const entry of parsed.items) {
       if (!knownIds.has(entry.poItemId))
         throw new Error('A submitted item does not belong to this purchase order');
     }
+
+    // Already-open flags for this PO, read once. A second open flag on the same
+    // line would be a duplicate in the purchaser's queue rather than new
+    // information: the remedy is to resolve the existing one, which is the only
+    // thing that can take it out of the queue.
+    const existingOpen = await tx.receivingDiscrepancy.findMany({
+      where: { poNumber: po.poNumber, status: RECEIVING_DISCREPANCY_STATUS.OPEN.value },
+      select: { poItemId: true },
+    });
+    const openItemIds = new Set(existingOpen.map((d) => d.poItemId));
 
     // One id shared by every line of this save, so the history groups them as a
     // single event without depending on two rows sharing a timestamp.
@@ -1955,9 +2463,11 @@ export async function recordReceiving(input: {
       to: number;
       unit: string;
     }[] = [];
+    const flagged: { itemDescription: string; type: string; remarks: string | null }[] = [];
     for (const item of po.items) {
       if (!inputMap.has(item.id)) continue;
-      const nextQty = inputMap.get(item.id)!;
+      const entry = inputMap.get(item.id)!;
+      const nextQty = entry.receivedQty;
       const purchasedQty = item.purchasedQty ?? 0;
       if (purchasedQty <= 0)
         throw new Error(
@@ -1965,36 +2475,72 @@ export async function recordReceiving(input: {
         );
       assertReceivedNotReduced(nextQty, item.receivedQty, item.itemDescription);
       assertValidReceivedQty(nextQty, purchasedQty, item.itemDescription);
-      if (nextQty === item.receivedQty) continue;
-      // Captured BEFORE the write. fromQty is what makes a later edit safe: it is
-      // the floor a corrected total may not fall below, so an edit can fix a
-      // miscount without undoing an earlier delivery. Reading it after the update
-      // would record the new total as both bounds and make the history vacuous.
-      const fromQty = item.receivedQty;
-      await tx.purchaseOrderItem.update({
-        where: { id: item.id },
-        data: { receivedQty: nextQty },
-      });
-      // The structured counterpart to the prose audit line below.
-      await tx.receivingRecord.create({
-        data: {
-          eventId,
-          poNumber: po.poNumber,
+
+      // Quantity and discrepancy are two independent facts about one physical
+      // check, so they are handled independently rather than the discrepancy
+      // being a side effect of a changed number. A checker may file a report
+      // against a line whose count is unchanged — "the fifty boxes all arrived
+      // but they are the wrong size" has no quantity movement to hang off — and
+      // that report must still be written.
+      if (nextQty !== item.receivedQty) {
+        // Captured BEFORE the write. fromQty is what makes a later edit safe: it is
+        // the floor a corrected total may not fall below, so an edit can fix a
+        // miscount without undoing an earlier delivery. Reading it after the update
+        // would record the new total as both bounds and make the history vacuous.
+        const fromQty = item.receivedQty;
+        await tx.purchaseOrderItem.update({
+          where: { id: item.id },
+          data: { receivedQty: nextQty },
+        });
+        // The structured counterpart to the prose audit line below.
+        await tx.receivingRecord.create({
+          data: {
+            eventId,
+            poNumber: po.poNumber,
+            poItemId: item.id,
+            itemDescription: item.itemDescription,
+            unit: item.unit,
+            fromQty,
+            toQty: nextQty,
+            actor: user.username,
+          },
+        });
+        deltas.push({
           poItemId: item.id,
           itemDescription: item.itemDescription,
+          from: fromQty,
+          to: nextQty,
           unit: item.unit,
-          fromQty,
-          toQty: nextQty,
-          actor: user.username,
-        },
-      });
-      deltas.push({
-        poItemId: item.id,
-        itemDescription: item.itemDescription,
-        from: fromQty,
-        to: nextQty,
-        unit: item.unit,
-      });
+        });
+      }
+
+      if (entry.discrepancy) {
+        if (openItemIds.has(item.id))
+          throw new Error(
+            `"${item.itemDescription}" already has an open discrepancy on this purchase order — resolve it before reporting another`,
+          );
+        // No quantity of its own is stored here. The checker's acceptable count
+        // is the receivedQty above; this row only records that the line was
+        // found unacceptable, what was wrong with it, and who said so.
+        await tx.receivingDiscrepancy.create({
+          data: {
+            poNumber: po.poNumber,
+            poItemId: item.id,
+            itemDescription: item.itemDescription,
+            unit: item.unit,
+            discrepancyType: entry.discrepancy.type,
+            remarks: entry.discrepancy.remarks || null,
+            status: RECEIVING_DISCREPANCY_STATUS.OPEN.value,
+            reportedBy: user.username,
+          },
+        });
+        openItemIds.add(item.id);
+        flagged.push({
+          itemDescription: item.itemDescription,
+          type: entry.discrepancy.type,
+          remarks: entry.discrepancy.remarks || null,
+        });
+      }
     }
 
     if (deltas.length) {
@@ -2002,6 +2548,19 @@ export async function recordReceiving(input: {
         poNumber: po.poNumber,
         action: 'receiving_recorded',
         detail: describeLines(deltas),
+        actor: user.username,
+      });
+    }
+    // Its own audit line rather than a clause on receiving_recorded: a flag is
+    // something a human decided to raise, and PO history is where someone
+    // looking back months later needs to find that they did.
+    if (flagged.length) {
+      await audit(tx, {
+        poNumber: po.poNumber,
+        action: 'discrepancy_reported',
+        detail: flagged
+          .map((f) => `${f.itemDescription}: ${f.type}${f.remarks ? ` — ${f.remarks}` : ''}`)
+          .join('; '),
         actor: user.username,
       });
     }
@@ -2048,6 +2607,112 @@ export async function recordReceiving(input: {
 
     return { po: updated, tracker: await buildTrackerTx(tx, parsed.poNumber) };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Resolve a receiving discrepancy (Purchaser / Admin)
+//
+// The warehouse raises the exception; the purchaser investigates and closes it.
+// That split is the whole point of the two roles, so it is enforced here rather
+// than in the UI: assertCanManagePOs() admits only Admin/Superadmin, which means
+// a Warehouse user cannot resolve a flag — including one they filed themselves
+// moments ago.
+//
+// "Resolved" means investigated and no longer needs action. It emphatically does
+// NOT mean:
+//
+//   - delete the row. The report and its remarks stay exactly as filed, so the
+//     history always shows a discrepancy was raised and what became of it.
+//   - adjust the quantities. If fifty were bought and forty-nine accepted, that
+//     stays fifty and forty-nine. Rewriting purchasedQty to 49 here would erase
+//     the record of what was actually bought and quietly reclassify a
+//     procurement problem as a receiving one. If the supplier will not deliver
+//     the remaining unit, Follow-up Purchase is the correct route.
+//
+// Because PurchaseOrder.status is never touched either, the PO returns to
+// whatever its own quantities say — classifyPOBucket() re-derives the section on
+// the next read — so a PO with one unit still outstanding stays In Progress and
+// one with nothing outstanding may complete on its own terms.
+// ---------------------------------------------------------------------------
+export async function resolveDiscrepancy(input: unknown) {
+  const parsed = resolveDiscrepancySchema.parse(input);
+  return runTx(async (tx) => {
+    const user = await assertCanManagePOs();
+    const existing = await tx.receivingDiscrepancy.findUnique({ where: { id: parsed.id } });
+    if (!existing) throw new Error('Discrepancy not found');
+    // The client cannot be trusted to pair an id with a PO it is entitled to.
+    if (existing.poNumber !== parsed.poNumber)
+      throw new Error('Discrepancy does not belong to this purchase order');
+    await lockPO(tx, existing.poNumber);
+    if (existing.status === RECEIVING_DISCREPANCY_STATUS.RESOLVED.value)
+      throw new Error('This discrepancy has already been resolved');
+
+    const resolution = parsed.resolution.trim();
+    await tx.receivingDiscrepancy.update({
+      where: { id: existing.id },
+      data: {
+        status: RECEIVING_DISCREPANCY_STATUS.RESOLVED.value,
+        resolvedBy: user.username,
+        resolvedAt: new Date(),
+        resolution,
+      },
+    });
+    await audit(tx, {
+      poNumber: existing.poNumber,
+      action: 'discrepancy_resolved',
+      detail: `${existing.itemDescription}: ${existing.discrepancyType} — ${resolution}`,
+      actor: user.username,
+    });
+
+    return { poNumber: existing.poNumber };
+  });
+}
+
+/**
+ * Composite key for "this flag on this line". A PO number and an item id are
+ * both opaque strings, so they are joined with a separator rather than
+ * concatenated — `PO-1` + `2` must not collide with `PO-12` + `""`.
+ */
+function discrepancyKey(poNumber: string, poItemId: string): string {
+  return `${poNumber}::${poItemId}`;
+}
+
+/**
+ * One projection of the stored row, so every reader labels a status the same way.
+ *
+ * Now lives in src/lib/archiveReportRows.ts and is imported back: a "use server"
+ * module may only export async functions, and exporting this one would fail at
+ * REQUEST time rather than at build time. The live report and the ARCHIVED
+ * report therefore share one projection, so a status label cannot drift between
+ * a dashboard export and the same warehouse's archived export.
+ */
+
+/**
+ * Every discrepancy ever raised on one PO, newest first.
+ *
+ * Open AND resolved: this is the history view, and a resolved flag that could
+ * only be seen while it was open would leave no record of what the checker
+ * reported or how it was dealt with.
+ *
+ * Readable by the warehouse that owns the PO as well as by the purchaser. The
+ * checker filed the report and is entitled to see that it was raised and what
+ * the investigation concluded — they just cannot resolve it themselves.
+ */
+export async function getPODiscrepancies(poNumber: string): Promise<PODiscrepancyRow[]> {
+  const user = await getCurrentUser();
+  if (!user) throw new Error('Unauthorized');
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { poNumber },
+    select: { warehouse: true },
+  });
+  if (!po) throw new Error('Purchase order not found');
+  if (user.role === 'Warehouse' && po.warehouse !== user.warehouse) throw new Error('Unauthorized');
+
+  const rows = await prisma.receivingDiscrepancy.findMany({
+    where: { poNumber },
+    orderBy: { reportedAt: 'desc' },
+  });
+  return rows.map(toPODiscrepancyRow);
 }
 
 /**

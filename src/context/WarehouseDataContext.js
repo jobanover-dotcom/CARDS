@@ -6,13 +6,14 @@ import {
   editLatestReceiving as editLatestReceivingServer,
   getPOTracker as getPOTrackerServer,
   getPOWorkload as getPOWorkloadServer,
+  getReceivingReport as getReceivingReportServer,
 } from '../../actions/procurement';
 import { createRequest as createRequestServer } from '../../actions/requests';
 
 const WarehouseDataContext = createContext(null);
 
 const EMPTY_STATS = { totalPOs: 0, completedPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, unifiedDiscrepancyCount: 0 };
-const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0 };
+const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0, mrsAggregates: {} };
 
 export function WarehouseDataProvider({ children }) {
   const [stats, setStats] = useState(EMPTY_STATS);
@@ -66,8 +67,11 @@ export function WarehouseDataProvider({ children }) {
   // approved request). Procurement follow-up against a PO is NOT exposed here:
   // the Admin performs a Follow-up Purchase on the same PO instead.
   const createRequest = useCallback(async (data) => {
-    await createRequestServer(data);
+    // The server allocates reqNumber; the created row (and therefore the
+    // authoritative number) is returned so callers never have to predict it.
+    const created = await createRequestServer(data);
     setRequestVersion((v) => v + 1);
+    return created;
   }, []);
 
   // Receiving is the warehouse's only purchase-order action.
@@ -90,6 +94,10 @@ export function WarehouseDataProvider({ children }) {
 
   const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
 
+  // Read-only snapshot for the printable Receiving Report. No version bump:
+  // viewing a report never mutates anything.
+  const getReceivingReport = useCallback(async (poNumber) => getReceivingReportServer(poNumber), []);
+
   return <WarehouseDataContext.Provider value={{
     stats, workload, loading, poVersion, requestVersion,
     completedCount: stats.completedPOs,
@@ -97,7 +105,7 @@ export function WarehouseDataProvider({ children }) {
     receivingDueCount: workload.receivingDuePOs ?? 0,
     inProgressCount: workload.inProgressCount ?? 0,
     completedWorkloadCount: workload.completedCount ?? 0,
-    refreshStats, refreshWorkload, updatePO, updatePOMonitoring, createRequest, recordReceiving, editLatestReceiving, getPOTracker,
+    refreshStats, refreshWorkload, updatePO, updatePOMonitoring, createRequest, recordReceiving, editLatestReceiving, getPOTracker, getReceivingReport,
   }}>{children}</WarehouseDataContext.Provider>;
 }
 

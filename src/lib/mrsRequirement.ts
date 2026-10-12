@@ -36,11 +36,21 @@ import {
   type MRSRequirementLine,
 } from './mrsAggregates';
 
-/** The subset of a Prisma client this module needs. Both `prisma` and a
- *  transaction client satisfy it, so callers can stay inside their transaction. */
+/**
+ * The subset of a Prisma client this module needs. Both `prisma` and a
+ * transaction client satisfy it, so callers can stay inside their transaction.
+ *
+ * Deliberately loose about the return. Prisma infers a query's result type from
+ * its own `include`, and nothing at this boundary can prove the caller asked for
+ * the relations `MRSPurchaseOrderRow` declares — so typing it as that row here
+ * would make this interface unsatisfiable by a real client, and the mismatch
+ * would be papered over by casts at the query site instead. Returning `unknown`
+ * keeps the cast where it belongs: on the result, at the one place that knows
+ * which relations it asked for.
+ */
 export interface MRSReadClient {
-  purchaseOrder: { findMany: (args: never) => Promise<MRSPurchaseOrderRow[]> };
-  warehouseRequest: { findMany: (args: never) => Promise<WarehouseRequestRow[]> };
+  purchaseOrder: { findMany: (args: never) => Promise<unknown> };
+  warehouseRequest: { findMany: (args: never) => Promise<unknown> };
 }
 
 interface WarehouseRequestItemRow {
@@ -74,6 +84,8 @@ export interface MRSPurchaseOrderRow {
   /** the allocation walk orders purchase orders newest-first */
   createdAt: Date;
   deliveries: { status: string | null }[];
+  /** open discrepancy rows for this PO, projected down to the item they belong to */
+  receivingDiscrepancies: { poItemId: string }[];
   items: MRSItemRow[];
 }
 
@@ -137,22 +149,46 @@ export function mrsItemAllowanceOf(aggregate: MRSAggregate): Map<string, MRSItem
 }
 
 /**
- * Divide one MRS's requirement across its purchase orders, newest first.
+ * Divide one MRS's requirement across its purchase orders.
  *
- * That order is not arbitrary — it is the order the requirement was actually
- * divided in when the POs were raised. A follow-up is created for the remainder
- * the MRS still allows, so the newest PO is the active purchasing vehicle and
- * takes its full requested amount, and each earlier PO keeps only what it had
- * already bought.
+ * TWO PASSES, because a purchase is a fact that later paperwork cannot undo.
+ *
+ * PASS 1 reserves what each purchase order has ALREADY bought, oldest first.
+ * This is the fix. A single newest-first walk let a PO raised later take its
+ * share away from one that bought earlier, so a purchase that was legal when it
+ * was made could end up above its own approved share:
+ *
+ *   MRS-001 approved 50 Nails
+ *     10:20  PO-4545 saves a purchase of 45   (only PO on the MRS -> share 50, legal)
+ *     10:23  PO-5656 raised for 5 Nails       -> PO-4545's share falls 50 -> 45
+ *     10:28  PO-343434 raised for 5 Nails     -> PO-4545's share falls 45 -> 40
+ *
+ * PO-4545 had bought 45 and 40 of them had arrived, yet the tracker reported
+ * Approved 40 / Purchased 45 / To receive 5. Nothing was wrong with the stored
+ * data; the derived share had shrunk underneath a real purchase. Reserving first
+ * means a PO's share can never drop below what it has already bought.
+ *
+ * PASS 2 then hands out whatever the requirement still has unallocated,
+ * newest-first — the order the requirement was actually divided in, since a
+ * follow-up is raised for the remainder and is therefore the active purchasing
+ * vehicle.
  *
  *   MRS-001 approved 100 · PO-001 bought 60 · follow-up PO-002 raised for 40
- *     PO-002 -> min(40, 100) = 40   remaining 60
- *     PO-001 -> min(100, 60) = 60   remaining 0
+ *     pass 1:  PO-001 -> 60 (purchased)      remaining 40
+ *              PO-002 ->  0                   remaining 40
+ *     pass 2:  PO-002 -> min(40, 40) = 40    remaining 0
+ *              PO-001 -> min(100-60, 0) = 0
  *
- * So PO-001 is now fully covered by its own purchase and derives Awaiting
- * Receiving (or Completed), while PO-002 still owes its 40 — which is exactly
- * what raising PO-002 was meant to do. Summed across the MRS the allocation
- * always equals the requirement, so nothing is invented or lost.
+ * Two invariants now hold by construction:
+ *   allocated >= purchased   a purchase is never invalidated
+ *   sum(allocated) <= approved, because pass 2 only ever distributes what pass 1
+ *   left. Since every purchase is capped at its own allocation, that makes
+ *   over-purchase structurally impossible rather than merely absent today.
+ *
+ * If purchases already exceed the requirement, `remaining` is allowed to go
+ * negative and each PO keeps what it bought. That is a real inconsistency and is
+ * left VISIBLE here rather than clamped away — see the CHECK constraints on
+ * PurchaseOrderItem, which bound each row but cannot see across rows.
  *
  * A legacy PO with no approval behind it falls back to its own snapshot as the
  * requirement, matching resolveRequirementLines().
@@ -161,28 +197,65 @@ function allocateForMRS(
   requirementLines: MRSRequirementLine[],
   purchaseOrders: MRSPurchaseOrderRow[],
 ): Map<string, MRSItemAllocation[]> {
-  const ordered = [...purchaseOrders].sort(
-    (a, b) => b.createdAt.getTime() - a.createdAt.getTime() || b.poNumber.localeCompare(a.poNumber),
-  );
+  const byAge = (a: MRSPurchaseOrderRow, b: MRSPurchaseOrderRow) =>
+    a.createdAt.getTime() - b.createdAt.getTime() || a.poNumber.localeCompare(b.poNumber);
+  const oldestFirst = [...purchaseOrders].sort(byAge);
+  const newestFirst = [...purchaseOrders].sort((a, b) => byAge(b, a));
+
   const remaining = new Map<string, number>(
     requirementLines.map((l) => [normalizeItemDescription(l.itemDescription), l.approvedQty]),
   );
   const unitByKey = new Map(
     requirementLines.map((l) => [normalizeItemDescription(l.itemDescription), l.unit ?? '']),
   );
+
+  // Keyed poNumber -> normalized description -> allocated share, built across
+  // both passes so the result is assembled once, at the end.
+  const allocatedByPo = new Map<string, Map<string, number>>();
+  const unitOf = (po: MRSPurchaseOrderRow, item: MRSItemRow) => {
+    const key = normalizeItemDescription(item.itemDescription);
+    return { key, unit: item.unit || unitByKey.get(key) || '' };
+  };
+
+  // PASS 1 — reserve what has already been purchased, oldest first.
+  for (const po of oldestFirst) {
+    for (const item of po.items) {
+      const { key } = unitOf(po, item);
+      // A purchase cannot exceed the line it was recorded against, so a row that
+      // somehow exceeds its own qty reserves only what the line could hold.
+      const purchased = Math.min(Math.max(0, item.purchasedQty ?? 0), item.qty);
+      const perPo = allocatedByPo.get(po.poNumber) ?? new Map<string, number>();
+      perPo.set(key, purchased);
+      allocatedByPo.set(po.poNumber, perPo);
+      remaining.set(key, (remaining.get(key) ?? 0) - purchased);
+    }
+  }
+
+  // PASS 2 — distribute what is left, newest first. Never below zero: a
+  // requirement already exhausted by real purchases hands out nothing more.
+  for (const po of newestFirst) {
+    for (const item of po.items) {
+      const { key } = unitOf(po, item);
+      const perPo = allocatedByPo.get(po.poNumber) ?? new Map<string, number>();
+      const already = perPo.get(key) ?? 0;
+      const room = Math.min(item.qty - already, Math.max(0, remaining.get(key) ?? 0));
+      perPo.set(key, already + room);
+      allocatedByPo.set(po.poNumber, perPo);
+      remaining.set(key, (remaining.get(key) ?? 0) - room);
+    }
+  }
+
   const out = new Map<string, MRSItemAllocation[]>();
-  for (const po of ordered) {
+  for (const po of purchaseOrders) {
+    const perPo = allocatedByPo.get(po.poNumber) ?? new Map<string, number>();
     out.set(
       po.poNumber,
       po.items.map((item) => {
-        const key = normalizeItemDescription(item.itemDescription);
-        const left = remaining.get(key) ?? 0;
-        const allocated = Math.min(item.qty, left);
-        remaining.set(key, left - allocated);
+        const { key, unit } = unitOf(po, item);
         return {
           itemDescription: item.itemDescription,
-          unit: item.unit || unitByKey.get(key) || '',
-          allocatedApproved: allocated,
+          unit,
+          allocatedApproved: perPo.get(key) ?? 0,
         };
       }),
     );
@@ -235,6 +308,12 @@ export function requirementLinesFromRequest(
 export interface MRSData {
   aggregates: Map<string, MRSAggregate>;
   allocations: MRSAllocations;
+  /**
+   * The purchase orders read for these MRS numbers, in `createdAt, poNumber`
+   * order. Exposed so a caller that needs a per-PO figure (mrsRoomForNewPO)
+   * reuses this read instead of issuing a second, redundant query.
+   */
+  pos: MRSPurchaseOrderRow[];
 }
 
 /**
@@ -256,11 +335,18 @@ export async function readMRSData(
   const wanted = [...new Set(mrsNumbers.filter((m) => !!m))];
   const aggregates = new Map<string, MRSAggregate>();
   const allocations: MRSAllocations = new Map();
-  if (!wanted.length) return { aggregates, allocations };
+  if (!wanted.length) return { aggregates, allocations, pos: [] };
 
   const pos = (await client.purchaseOrder.findMany({
     where: { mrsNo: { in: wanted } },
-    include: { items: true, deliveries: { select: { status: true } } },
+    // `deliveries` feeds the frozen archive flag; `receivingDiscrepancies` feeds
+    // the live one. Both are needed for the roll-up to be the union of the two,
+    // and both are projected to nothing but what the flag actually reads.
+    include: {
+      items: true,
+      deliveries: { select: { status: true } },
+      receivingDiscrepancies: { where: { status: 'open' }, select: { poItemId: true } },
+    },
     orderBy: [{ createdAt: 'asc' }, { poNumber: 'asc' }],
   } as never)) as MRSPurchaseOrderRow[];
 
@@ -303,6 +389,11 @@ export async function readMRSData(
           status: po.status,
           poType: po.poType,
           deliveries: po.deliveries,
+          // Counted here so the aggregate reads one number per PO. The item ids
+          // are not projected further: a discrepancy rolls up to its purchase
+          // order and no higher, and per-line detail travels on the PO row
+          // itself.
+          openDiscrepancyCount: po.receivingDiscrepancies?.length ?? 0,
           items: po.items.map((i) => ({
             itemDescription: i.itemDescription,
             unit: i.unit,
@@ -315,7 +406,7 @@ export async function readMRSData(
     );
     allocations.set(mrsNo, allocateForMRS(requirementLines, members));
   }
-  return { aggregates, allocations };
+  return { aggregates, allocations, pos };
 }
 
 /** The aggregates only, for callers that do not need the allocation. */
@@ -324,6 +415,70 @@ export async function readMRSAggregates(
   mrsNumbers: string[],
 ): Promise<Map<string, MRSAggregate>> {
   return (await readMRSData(client, mrsNumbers)).aggregates;
+}
+
+/**
+ * How much of a requirement is still free for a NEW purchase order to claim.
+ *
+ * ONE reservation basis, shared by every PO-creation path — `createPO` and
+ * `createPOWithApproval` in actions/pos.ts and `createFollowUpPO` in
+ * actions/procurement.ts — so the three cannot disagree about the same
+ * requirement. Before this, the direct paths measured `approved - sum(allocated)`
+ * while the follow-up path measured `approved - purchased`, which made a
+ * legitimate follow-up impossible through one door and allowed it through the
+ * other.
+ *
+ * The committed figure per line is:
+ *
+ *     committed = purchased > 0 ? purchased : qty
+ *
+ * That follows from the rule `savePurchase` already enforces: a PO that holds
+ * ANY purchase can never purchase again — buying more raises a NEW PO against the
+ * same MRS. So a PO that has recorded a purchase can never claim more than it
+ * bought, and one that has not yet may claim up to its line quantity.
+ *
+ *   approved 100 · PO-A qty 100 purchased 60   commits 60   -> 40 left
+ *   approved 100 · PO-A qty 60  purchased 60    commits 60   -> 40 left
+ *   approved 100 · PO-A qty 60  purchased 0     commits 60   -> 40 left
+ *   approved 100 · PO-A qty 100 purchased 100   commits 100  ->  0 left
+ *
+ * A purchased quantity is never double-counted: the purchase IS the committed
+ * figure for that line, not an addition to it. There is no second reservation
+ * ledger — this is derived from the same rows the aggregate is derived from, on
+ * every call.
+ *
+ * Cancelled purchase orders are NOT excluded, matching `allocateForMRS` and
+ * `aggregateMRS`, neither of which reads PO status. That is the repository's
+ * existing policy and is preserved rather than re-decided here.
+ *
+ * Room is never negative: a requirement already fully committed hands out
+ * nothing further rather than a negative allowance.
+ */
+export function mrsRoomForNewPO(data: MRSData, mrsNo: string): Map<string, { remaining: number; unit: string }> {
+  const aggregate = data.aggregates.get(mrsNo);
+  if (!aggregate || !aggregate.lines.length) return new Map();
+
+  const committed = new Map<string, number>();
+  for (const po of data.pos) {
+    for (const item of po.items ?? []) {
+      const key = normalizeItemDescription(item.itemDescription);
+      const purchased = Math.max(0, item.purchasedQty ?? 0);
+      committed.set(key, (committed.get(key) ?? 0) + (purchased > 0 ? purchased : Math.max(0, item.qty)));
+    }
+  }
+
+  return new Map(
+    aggregate.lines.map((l) => {
+      const key = normalizeItemDescription(l.itemDescription);
+      return [
+        key,
+        {
+          remaining: Math.max(0, l.approvedQty - (committed.get(key) ?? 0)),
+          unit: l.unit ?? '',
+        },
+      ] as const;
+    }),
+  );
 }
 
 /**

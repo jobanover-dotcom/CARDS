@@ -12,6 +12,7 @@ import {
   getPurchaseOrderReceiptUrl,
 } from '../../../actions/poReceipts';
 import { createClient } from '../../../lib/supabase-client';
+import ReportDiscrepancyModal from './ReportDiscrepancyModal';
 
 // Receiving form. The supplier delivers physically and outside CARDS; this
 // records what ACTUALLY arrived, against the purchase order.
@@ -32,6 +33,24 @@ import { createClient } from '../../../lib/supabase-client';
 // per-line numbers behind each arrival. The latest event carries an Edit control:
 // a miscount can be corrected there, and the row keeps the figure it was
 // originally given so the change is visible rather than silent.
+//
+// A DISCREPANCY is the opposite of an ordinary short delivery. If fifty were
+// bought and forty arrived with nothing wrong, that is simply receiving
+// outstanding and the form says nothing about it. A discrepancy is an actual
+// problem the checker found with what turned up — damaged, wrong item, wrong
+// size — and it is raised per ITEM from the row being checked, never per PO: a
+// delivery whose cement was fine and whose nails were not has one discrepant
+// line, not two.
+//
+// The report adds no quantity of its own. The checker lowers ARRIVED NOW to what
+// they can count as acceptable, and says what was wrong with the rest. There is
+// no damaged quantity anywhere — fifty purchased with one damaged is recorded as
+// forty-nine received plus a Damaged Item report.
+//
+// Staged, not submitted. The modal collects the type and remarks into form state
+// and the existing Confirm Receiving button writes the quantity and the report
+// together, so a delivery is never committed with the checker unable to record
+// what was wrong with it.
 function ReceivePOForm({ poNumber, onClose, onSaved }) {
   const { recordReceiving, getPOTracker, editLatestReceiving: correctReceiving } = useWarehouseData();
   const [tracker, setTracker] = useState(null);
@@ -54,6 +73,11 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
   const [editValues, setEditValues] = useState({});
   const [editError, setEditError] = useState('');
   const [editing, setEditing] = useState(false);
+  // Discrepancies staged against a line, awaiting the Confirm Receiving submit:
+  // { [poItemId]: { type, remarks } }
+  const [discrepancies, setDiscrepancies] = useState({});
+  // Which line the Report Discrepancy modal is open for.
+  const [discrepancyFor, setDiscrepancyFor] = useState(null);
 
   /**
    * Seed the ARRIVAL inputs with each line's outstanding quantity, and refresh
@@ -167,6 +191,12 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
   const outstandingOf = (item) =>
     Math.max(0, (item.purchasedQty ?? 0) - item.receivedQty);
 
+  // A line with no purchased quantity has nothing to receive against, so it is
+  // not offered for receiving. One predicate drives both the rendered rows and
+  // the submitted payload: the form must never offer a line it then refuses to
+  // save, because the server rejects the whole submission when one is included.
+  const isReceivable = (item) => (item.purchasedQty ?? 0) > 0;
+
   // The edit input's ceiling is the PURCHASED quantity, not the outstanding one:
   // a correction can raise a total above what is still expected, and only the
   // purchased figure is a real limit. It also cannot go below fromQty, which is
@@ -248,13 +278,20 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
       // already saved.
       const result = await recordReceiving({
         poNumber,
-        items: tracker.items.map((item) => ({
+        items: tracker.items.filter(isReceivable).map((item) => ({
           poItemId: item.poItemId,
           receivedQty: item.receivedQty + Number(arrived[item.poItemId] ?? 0),
+          // Present ONLY for a line the checker flagged. An ordinary partial
+          // delivery sends no `discrepancy` key at all, which is what keeps a
+          // short receipt from ever becoming a discrepancy.
+          ...(discrepancies[item.poItemId]
+            ? { discrepancy: discrepancies[item.poItemId] }
+            : {}),
         })),
         remarks: remarks.trim() || undefined,
       });
       setSaved(true);
+      setDiscrepancies({});
       await Promise.all([load(), loadHistory()]);
 
       let uploadFailed = null;
@@ -287,7 +324,7 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
     );
   }
 
-  const receivable = tracker.items.filter((i) => i.purchasedQty > 0);
+  const receivable = tracker.items.filter(isReceivable);
 
   return (
     <>
@@ -315,8 +352,13 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
           {receivable.map((item) => {
             const outstanding = outstandingOf(item);
             const entered = Number(arrived[item.poItemId] || 0);
+            // Already reported and unresolved: shown, not re-reportable. The
+            // remedy is for the purchaser to resolve it, which the warehouse
+            // cannot do — so this is the only state that offers no action here.
+            const openFlag = tracker.discrepancies?.find((d) => d.poItemId === item.poItemId);
+            const staged = discrepancies[item.poItemId];
             return (
-            <div key={item.poItemId} className="grid grid-cols-[1.6fr_.8fr_.8fr_.9fr_.9fr] gap-2 items-end border-b border-[#f1f1f1] pb-3 last:border-b-0 last:pb-0">
+            <div key={item.poItemId} className="grid grid-cols-[1.6fr_.8fr_.8fr_.9fr_.9fr_auto] gap-2 items-end border-b border-[#f1f1f1] pb-3 last:border-b-0 last:pb-0">
               <div>
                 <label className="text-[10px] font-bold text-[#999]">ITEM</label>
                 <div className="text-[13px] font-medium text-[#333]">
@@ -325,6 +367,23 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
                 <div className="text-[10px] text-[#006680] font-semibold">
                   {item.receivedQty} received &middot; {outstanding} outstanding
                 </div>
+                {openFlag && (
+                  // Read-only on purpose. There is deliberately no unflag control:
+                  // the warehouse raised this and the purchaser closes it.
+                  <div className="mt-1 text-[10px] text-[#c62828]">
+                    <span className="font-bold">Discrepancy:</span> {openFlag.discrepancyType}
+                    <span className="text-[#888]">
+                      {' '}· reported by {openFlag.reportedBy} on{' '}
+                      {new Date(openFlag.reportedAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                )}
+                {staged && !openFlag && (
+                  <div className="mt-1 text-[10px] text-[#c62828]">
+                    <span className="font-bold">Discrepancy:</span> {staged.type}
+                    <span className="text-[#888]"> · will be recorded when you confirm receiving</span>
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-[10px] font-bold text-[#999]">PURCHASED</label>
@@ -363,10 +422,39 @@ function ReceivePOForm({ poNumber, onClose, onSaved }) {
                   {Math.max(0, outstanding - entered)}
                 </div>
               </div>
+              {/* On the row for the line being checked, so a report is never
+                  ambiguous about which item it is about. */}
+              <div>
+                {!openFlag && (
+                  <button
+                    type="button"
+                    onClick={() => setDiscrepancyFor(item)}
+                    aria-label={`${staged ? 'Edit' : 'Report'} discrepancy for ${item.itemDescription}`}
+                    className="py-2 px-3 bg-white text-[#d32f2f] border border-[#ffcdd2] rounded-md text-xs font-semibold cursor-pointer transition-all duration-200 hover:bg-[#fef5f5] whitespace-nowrap"
+                  >
+                    {staged ? 'Edit Discrepancy' : 'Report Discrepancy'}
+                  </button>
+                )}
+              </div>
             </div>
             );
           })}
         </div>
+      )}
+
+      {/* Staged, not saved: nothing is written until Confirm Receiving runs, so
+          the quantity and the report land in one transaction. */}
+      {discrepancyFor && (
+        <ReportDiscrepancyModal
+          poNumber={poNumber}
+          mrsNo={tracker.mrsNo}
+          item={discrepancyFor}
+          onStage={(detail) => {
+            setDiscrepancies((prev) => ({ ...prev, [discrepancyFor.poItemId]: detail }));
+            setDiscrepancyFor(null);
+          }}
+          onClose={() => setDiscrepancyFor(null)}
+        />
       )}
 
       <div className="mt-3">

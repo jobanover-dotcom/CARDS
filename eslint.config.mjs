@@ -22,7 +22,10 @@ export default defineConfig([
     },
   },
   {
-    files: ['**/*.test.{ts,tsx}', '**/*.spec.{ts,tsx}'],
+    // Test fixtures are dynamic shapes standing in for Prisma rows, so `any` is
+    // the honest type there. `__tests__/helpers/` holds the shared doubles those
+    // files import, and needs the same exemption as the files themselves.
+    files: ['**/*.test.{ts,tsx}', '**/*.spec.{ts,tsx}', '**/__tests__/helpers/**/*.{ts,tsx}'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': 'off',

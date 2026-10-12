@@ -185,46 +185,53 @@ describe('warehouse request rows show requirement progress', () => {
     expect(screen.queryByText('Awaiting Receiving')).toBeNull();
   });
 
-  it('still offers File Follow-Up on the approval balance, unchanged', async () => {
-    getRequests.mockResolvedValue({
-      rows: [
-        request({
-          reqNumber: 'REQ-002',
-          mrsNo: 'MRS-002',
-          status: 'Partially Approved',
-          items: [{ id: 'ri-2', itemDescription: 'Steel', unit: 'pcs', qty: 50, approvedQty: 30 }],
-        }),
-      ],
-      total: 1,
-    });
-    getMRSProgress.mockResolvedValue({ byMrsNo: {} });
-    await renderView();
-    // 50 requested, 30 approved -> a 20 approval balance, so a follow-up is
-    // still filable. Purchasing progress did not change this rule.
-    expect(screen.getByRole('button', { name: 'File Follow-Up' })).toBeTruthy();
-  });
+  it('never offers File Follow-Up, and names the purchaser as who decides', async () => {
+      // Request-level follow-up was removed. A partially approved request whose
+      // balance is undecided is now the PURCHASER's to settle via Follow-up
+      // Approval on the same request, so the row states that rather than offering
+      // a way to open a parallel approval chain.
+      getRequests.mockResolvedValue({
+        rows: [
+          request({
+            reqNumber: 'REQ-002',
+            mrsNo: 'MRS-002',
+            status: 'Partially Approved',
+            items: [{ id: 'ri-2', itemDescription: 'Steel', unit: 'pcs', qty: 50, approvedQty: 30 }],
+          }),
+        ],
+        total: 1,
+      });
+      getMRSProgress.mockResolvedValue({ byMrsNo: {} });
+      await renderView();
 
-  it('withdraws File Follow-Up once the remainder has been rejected', async () => {
-    // 50 requested, 30 approved, 20 rejected. Rejection is final: the warehouse
-    // cannot re-file for the 20 the purchaser refused, so the balance is zero.
-    getRequests.mockResolvedValue({
-      rows: [
-        request({
-          reqNumber: 'REQ-003',
-          mrsNo: 'MRS-003',
-          status: 'Approval Closed',
-          items: [
-            { id: 'ri-3', itemDescription: 'Steel', unit: 'pcs', qty: 50, approvedQty: 30, rejectedQty: 20 },
-          ],
-        }),
-      ],
-      total: 1,
+      // 50 requested, 30 approved -> a 20 approval balance, and still no button.
+      expect(screen.queryByRole('button', { name: 'File Follow-Up' })).toBeNull();
+      expect(screen.getByText('Awaiting purchaser decision')).toBeTruthy();
     });
-    getMRSProgress.mockResolvedValue({ byMrsNo: {} });
-    await renderView();
 
-    expect(screen.queryByRole('button', { name: 'File Follow-Up' })).toBeNull();
-    // The rejected figure is what the balance cell now explains.
-    expect(screen.getByText('20 rejected')).toBeTruthy();
+    it('shows no pending hint once the remainder has been rejected', async () => {
+      // 50 requested, 30 approved, 20 rejected. Rejection is final and the balance
+      // is zero, so there is no decision outstanding for anyone to make.
+      getRequests.mockResolvedValue({
+        rows: [
+          request({
+            reqNumber: 'REQ-003',
+            mrsNo: 'MRS-003',
+            status: 'Approval Closed',
+            items: [
+              { id: 'ri-3', itemDescription: 'Steel', unit: 'pcs', qty: 50, approvedQty: 30, rejectedQty: 20 },
+            ],
+          }),
+        ],
+        total: 1,
+      });
+      getMRSProgress.mockResolvedValue({ byMrsNo: {} });
+      await renderView();
+
+      expect(screen.queryByRole('button', { name: 'File Follow-Up' })).toBeNull();
+      expect(screen.queryByText('Awaiting purchaser decision')).toBeNull();
+      // The rejected figure is what the balance cell now explains.
+      expect(screen.getByText('20 rejected')).toBeTruthy();
+    });
   });
-});
+;

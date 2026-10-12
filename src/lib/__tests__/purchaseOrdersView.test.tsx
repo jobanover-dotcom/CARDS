@@ -435,14 +435,14 @@ describe('the two views describe the same columns', () => {
     await waitForMRSView();
     const mrsHeaders = headers(container);
 
-    expect(poHeaders).toHaveLength(6);
-    expect(mrsHeaders).toHaveLength(6);
+    expect(poHeaders).toHaveLength(7);
+    expect(mrsHeaders).toHaveLength(7);
     const differing = poHeaders
       .map((h, i) => (h === mrsHeaders[i] ? null : { index: i, po: h, mrs: mrsHeaders[i] }))
       .filter(Boolean);
     expect(differing).toEqual([
       { index: 0, po: 'PO', mrs: 'MRS' },
-      { index: 3, po: 'Items', mrs: 'POs' },
+      { index: 4, po: 'Items', mrs: 'POs' },
     ]);
   });
 });

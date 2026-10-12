@@ -5,9 +5,11 @@ import SearchInput from '../ui/SearchInput';
 import EmptyState from '../ui/EmptyState';
 import StatusBadge from '../ui/StatusBadge';
 import TableSkeleton from '../ui/TableSkeleton';
+import SegmentedControl from '../ui/SegmentedControl';
 import MaterialRequestReceipt from '../shared/MaterialRequestReceipt';
 import POQuantityTracker from '../shared/POQuantityTracker';
 import ReceivePOForm from './ReceivePOForm';
+import ReceivingReport from './ReceivingReport';
 import {
   actionPrimary,
   actionSecondary,
@@ -48,13 +50,65 @@ const TABS = {
   completed: { label: 'Completed', sub: 'Every item fully purchased and fully received' },
 };
 
-const COLUMNS = ['PO date', 'PO number', 'MRS No.', 'Approved', 'Purchased', 'Received', 'To Receive', 'Supplier', 'Status', 'Action'];
+const COLUMNS = ['PO date', 'PO number', 'MRS No.', 'Approved', 'Purchased', 'Received', 'To Receive', 'Supplier', 'Supplier RR/DR', 'Status', 'Action'];
 const COL_SPAN = COLUMNS.length;
 const NUMERIC_COLUMNS = ['Approved', 'Purchased', 'Received', 'To Receive'];
+
+// Two presentations of the same purchase orders, mirroring the purchaser's toggle.
+// `pos` is the default and stays the primary experience; `mrs` only nests the
+// identical PO rows under the material request they fulfil.
+//
+// It is PRESENTATION only: same rows, same quantities, same three sections, no
+// refetch. Grouping never re-prices anything — the band quotes the server's
+// per-MRS roll-up verbatim.
+//
+// Deliberately NOT the purchaser's collapsible MRS row. An MRS has no supplier,
+// no PO date and no status of its own, so a warehouse top-level row built that
+// way would hide the very fields the warehouse acts on. Here the band is a thin
+// label above PO rows that keep every column.
+const VIEW_OPTIONS = [
+  { value: 'pos', label: 'POs', title: 'One row per purchase order' },
+  { value: 'mrs', label: 'MRS', title: 'Purchase orders grouped by material request' },
+];
+
+/**
+ * The band that heads one material request's purchase orders.
+ *
+ * A label, not a control: it carries no `aria-expanded` and is not clickable,
+ * because the rows under it are already visible. Nothing here is collapsible —
+ * collapsing would only hide purchase orders the reader came to see, and would
+ * make the band indistinguishable from a PO row to anything selecting rows by
+ * `aria-expanded`.
+ *
+ * Every figure is the server's per-MRS roll-up, quoted verbatim. Note that under
+ * a search the band can read larger than the rows beneath it: an MRS roll-up
+ * deliberately counts every purchase order on the requirement, including siblings
+ * the search filtered out, because the requirement does not stop being the
+ * requirement when a row is hidden.
+ */
+function MRSBandRow({ mrsNo, totals, requisitioner }) {
+  return (
+    <tr data-testid="mrs-band" className="bg-[#eef4fb] border-y border-[#d5e4f2]">
+      <td colSpan={COL_SPAN} className="px-4 py-2 border-l-2 border-l-[#1e3c72]">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+          <span className="text-[13px] font-bold text-[#1e3c72]">{mrsNo}</span>
+          {requisitioner && <span className="text-[11px] text-[#666]">{requisitioner}</span>}
+          <span className="text-[11px] text-[#555]">
+            Approved {totals.approved} &middot; Purchased {totals.purchased} &middot; Received {totals.received}
+          </span>
+          <span className={`text-[11px] font-bold ${totals.receivingOutstanding ? 'text-[#006680]' : 'text-[#2e7d32]'}`}>
+            {totals.receivingOutstanding} to receive
+          </span>
+        </div>
+      </td>
+    </tr>
+  );
+}
 
 function PurchaseOrdersView() {
   const { poVersion, getPOTracker } = useWarehouseData();
   const [tab, setTab] = useState('receiving');
+  const [view, setView] = useState('pos');
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [workload, setWorkload] = useState(null);
@@ -64,6 +118,7 @@ function PurchaseOrdersView() {
   const [trackerPoNumber, setTrackerPoNumber] = useState(null);
   const [trackerData, setTrackerData] = useState(null);
   const [receiptPo, setReceiptPo] = useState(null);
+  const [reportPoNumber, setReportPoNumber] = useState(null);
   // One purchase order expanded at a time. The rows are per PO because that is
   // the unit a purchase order IS: receiving is recorded against the PO, so one PO
   // gets one Receive action no matter how many of its items are outstanding.
@@ -113,6 +168,47 @@ function PurchaseOrdersView() {
     setExpandedPoNumber(null);
   };
 
+  // Switching presentation collapses too: the row the detail belongs to moves.
+  const selectView = (next) => {
+    setView(next);
+    setExpandedPoNumber(null);
+  };
+
+  /**
+   * The rows as listed, grouped under their material request in `mrs` mode.
+   *
+   * Each entry is either a PO row or the band that heads its group. Sorting is
+   * the only thing done here — grouping by MRS reorders the list, so it is never
+   * the default: Receiving Due reads best as a most-recently-updated queue.
+   *
+   * The band's figures come from the server's roll-up, never from summing the PO
+   * rows beneath it. `approved` belongs to the requirement and is counted ONCE
+   * across the MRS, while a PO's own approved is just its allocated share —
+   * summing those shares is the double count mrsAggregates exists to prevent.
+   */
+  const listedRows = useMemo(() => {
+    // The stripe alternates over PURCHASE ORDERS, not over rendered rows, so
+    // inserting a band cannot shift the shading of the row beneath it.
+    let poIndex = 0;
+    if (view !== 'mrs') return rows.map((po) => ({ kind: 'po', po, stripe: poIndex++ }));
+    const aggregates = workload?.mrsAggregates ?? {};
+    const ordered = [...rows].sort(
+      (a, b) => a.mrsNo.localeCompare(b.mrsNo) || a.poNumber.localeCompare(b.poNumber),
+    );
+    const out = [];
+    let current = null;
+    for (const po of ordered) {
+      // A PO with no MRS number has no roll-up to quote, so it is left unbanded
+      // rather than given an empty heading.
+      if (po.mrsNo !== current && aggregates[po.mrsNo]) {
+        current = po.mrsNo;
+        out.push({ kind: 'mrs', mrsNo: po.mrsNo, totals: aggregates[po.mrsNo], requisitioner: po.requisitioner });
+      }
+      out.push({ kind: 'po', po, stripe: poIndex++ });
+    }
+    return out;
+  }, [rows, view, workload?.mrsAggregates]);
+
   const openTracker = async (poNumber) => {
     setTrackerPoNumber(poNumber);
     setTrackerData(null);
@@ -151,8 +247,16 @@ function PurchaseOrdersView() {
       </div>
 
       <div className="mb-4">
-        <h2 className="m-0 text-lg text-[#333] font-bold">{TABS[tab].label}</h2>
-        <p className="mt-1 mx-0 mb-0 text-[13px] text-[#999]">{TABS[tab].sub}</p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="m-0 text-lg text-[#333] font-bold">{TABS[tab].label}</h2>
+            <p className="mt-1 mb-0 text-[13px] text-[#999]">{TABS[tab].sub}</p>
+          </div>
+          {/* Presentation only. Changes no quantity, no status and no row — the
+              same purchase orders, listed under their material request instead
+              of beside each other. */}
+          <SegmentedControl label="Purchase order view" options={VIEW_OPTIONS} value={view} onChange={selectView} />
+        </div>
       </div>
 
       {workloadError && <p className="text-[13px] text-[#c62828]">{workloadError}</p>}
@@ -170,9 +274,13 @@ function PurchaseOrdersView() {
               </tr>
             </thead>
             <tbody>
-              {rows.length > 0 ? (
+              {listedRows.length > 0 ? (
                 <>
-                  {rows.map((po, index) => {
+                  {listedRows.map((entry) => {
+                    if (entry.kind === 'mrs') {
+                      return <MRSBandRow key={`mrs-${entry.mrsNo}`} mrsNo={entry.mrsNo} totals={entry.totals} requisitioner={entry.requisitioner} />;
+                    }
+                    const { po, stripe } = entry;
                     const expanded = expandedPoNumber === po.poNumber;
                     const t = po.totals ?? {};
                     return (
@@ -181,7 +289,7 @@ function PurchaseOrdersView() {
                           onClick={() => toggleExpanded(po.poNumber)}
                           aria-expanded={expanded}
                           title={expanded ? 'Collapse purchase order' : 'Expand to see its items'}
-                          className={`${trEl} ${trHover} cursor-pointer ${expanded ? trSelected : stripeAt(index)}`}
+                          className={`${trEl} ${trHover} cursor-pointer ${expanded ? trSelected : stripeAt(stripe)}`}
                         >
                           <td className="p-4 whitespace-nowrap">
                             <div className="flex items-center gap-2">
@@ -198,6 +306,7 @@ function PurchaseOrdersView() {
                             {t.receivingOutstanding}
                           </td>
                           <td className={tdEl}>{po.supplier || <span className="text-[#bbb]">&mdash;</span>}</td>
+                          <td className={`${tdEl} whitespace-nowrap`}>{po.supplierRrDrNo || <span className="text-[#bbb]">&mdash;</span>}</td>
                           <td className="p-4 whitespace-nowrap"><StatusBadge status={po.statusLabel} /></td>
                           <td className="p-4 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                             {po.receivingDue ? (
@@ -205,13 +314,28 @@ function PurchaseOrdersView() {
                                 Receive
                               </button>
                             ) : (
-                              <button onClick={() => setTrackerPoNumber(po.poNumber)} className={actionPrimary}>
-                                View
+                              /* View expands this purchase order's items in place.
+                                 Track is the modal, and the two say different things,
+                                 so View must not open the tracker it does not load. */
+                              <button
+                                onClick={() => toggleExpanded(po.poNumber)}
+                                title={expanded ? 'Hide this purchase order' : 'Show this purchase order'}
+                                className={actionPrimary}
+                              >
+                                {expanded ? 'Close' : 'View'}
                               </button>
                             )}
                             <button onClick={() => openTracker(po.poNumber)} className={`${actionSecondary} ml-2`}>
                               Track
                             </button>
+                            {/* Printable Receiving Report — completed POs only. The
+                                report is a read-only snapshot; viewing or printing
+                                it never mutates the PO. */}
+                            {po.lifecycle === 'completed' && (
+                              <button onClick={() => setReportPoNumber(po.poNumber)} className={`${actionSecondary} ml-2`}>
+                                Report
+                              </button>
+                            )}
                           </td>
                         </tr>
 
@@ -277,6 +401,7 @@ function PurchaseOrdersView() {
                 <p className="m-0 mb-3 text-[12px] text-[#666]">
                   <span className="font-bold">PO </span>{trackerData.poNumber}
                   {' '}&middot; <span className="font-bold">Supplier </span>{trackerData.supplier || '—'}
+                  {' '}&middot; <span className="font-bold">Supplier RR/DR </span>{trackerData.supplierRrDrNo || '—'}
                   {' '}&middot; <span className="font-bold">Status </span>{trackerData.statusLabel}
                 </p>
                 <POQuantityTracker variant="receiving" tracker={trackerData} />
@@ -299,6 +424,10 @@ function PurchaseOrdersView() {
 
       {receiptPo && (
         <MaterialRequestReceipt po={receiptPo} onClose={() => setReceiptPo(null)} />
+      )}
+
+      {reportPoNumber && (
+        <ReceivingReport poNumber={reportPoNumber} onClose={() => setReportPoNumber(null)} />
       )}
     </div>
   );

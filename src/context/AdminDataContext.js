@@ -1,8 +1,8 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { getPOStats, createPO as createPOServer, createPOWithApproval, createPOFromApprovedRequest as createPOFromApprovedRequestServer, updatePO as updatePOServer, deletePO as deletePOServer } from '../../actions/pos';
-import { savePurchase as savePurchaseServer, createFollowUpPO as createFollowUpPOServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer } from '../../actions/procurement';
-import { getRequestCounts, approveRequestPartial, declineRequest, deleteRequest as deleteRequestServer, approveRemaining as approveRemainingServer, rejectRemaining as rejectRemainingServer } from '../../actions/requests';
+import { savePurchase as savePurchaseServer, createFollowUpPO as createFollowUpPOServer, getPOTracker as getPOTrackerServer, getPOWorkload as getPOWorkloadServer, resolveDiscrepancy as resolveDiscrepancyServer, updateSupplierRrDrNo as updateSupplierRrDrNoServer, getReceivingReport as getReceivingReportServer } from '../../actions/procurement';
+import { getRequestCounts, approveRequest, declineRequest, deleteRequest as deleteRequestServer, approveRemaining as approveRemainingServer, rejectRemaining as rejectRemainingServer } from '../../actions/requests';
 import { addUser as addUserServer, deleteUser as deleteUserServer, updateUserWarehouse } from '../../actions/users';
 import { getWarehouses, addWarehouse as addWarehouseServer } from '../../actions/warehouses';
 import { deleteWarehouseWithArchive } from '../../actions/archive';
@@ -14,7 +14,7 @@ const EMPTY_STATS = { totalPOs: 0, completedPOs: 0, awaitingPurchaseCount: 0, in
 // Quantity-driven workload: what the Admin can still buy, and what the
 // warehouse can still receive. Derived from the same canonical server-side
 // quantity chain the tables render.
-const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0 };
+const EMPTY_WORKLOAD = { totalPOs: 0, awaitingPurchaseCount: 0, inProgressCount: 0, completedCount: 0, followUpPOs: 0, receivingDuePOs: 0, mrsAggregates: {} };
 
 export function AdminDataProvider({ children }) {
   const [warehouses, setWarehouses] = useState([]);
@@ -96,7 +96,12 @@ export function AdminDataProvider({ children }) {
   }, []);
 
   const handleApproveRequest = useCallback(async (reqNumber) => {
-    await approveRequestPartial(reqNumber);
+    // "Approve" on a request means approve EVERY line in full, so it calls the
+    // full-approval door. It used to call approveRequestPartial(reqNumber) with
+    // no quantities, which silently meant "approve everything" and could erase a
+    // recorded rejection (DEF-1). approveRequestPartial now refuses a submission
+    // that carries no decision, so the intent has to be stated explicitly.
+    await approveRequest(reqNumber);
     setRequestVersion(v => v + 1);
     await refreshRequestCounts();
   }, [refreshRequestCounts]);
@@ -191,7 +196,33 @@ export function AdminDataProvider({ children }) {
     return result;
   }, [refreshStats, refreshWorkload, refreshRequestCounts]);
 
+  // Resolving a discrepancy closes an exception on the Discrepancies list, which
+  // is derived from the quantity scan — so the version bump that refetches the
+  // tables is also what takes the PO out of the Discrepancies section when its
+  // last open flag is closed. No quantities change here, which is why there is
+  // no reason to touch anything else.
+  const resolveDiscrepancy = useCallback(async (input) => {
+    const result = await resolveDiscrepancyServer(input);
+    setPoVersion(v => v + 1);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
+
   const getPOTracker = useCallback(async (poNumber) => getPOTrackerServer(poNumber), []);
+
+  // Narrow edit of the supplier RR/DR reference only — never quantities,
+  // supplier identity, or status. Purchaser/admin-only; warehouse users never
+  // get this function.
+  const updateSupplierRrDrNo = useCallback(async (input) => {
+    const result = await updateSupplierRrDrNoServer(input);
+    setPoVersion(v => v + 1);
+    await Promise.all([refreshStats(), refreshWorkload()]);
+    return result;
+  }, [refreshStats, refreshWorkload]);
+
+  // Read-only snapshot for the printable Receiving Report. No version bump:
+  // viewing a report never mutates anything.
+  const getReceivingReport = useCallback(async (poNumber) => getReceivingReportServer(poNumber), []);
 
   return (
     <AdminDataContext.Provider value={{
@@ -206,7 +237,8 @@ export function AdminDataProvider({ children }) {
       refreshStats,
       refreshWorkload,
       createPO, updatePO, deletePO, addUser, deleteUser, assignWarehouse,
-      savePurchase, createFollowUpPO, createPOFromApprovedRequest, getPOTracker,
+      savePurchase, createFollowUpPO, createPOFromApprovedRequest, getPOTracker, resolveDiscrepancy,
+      updateSupplierRrDrNo, getReceivingReport,
       approveRequest: handleApproveRequest,
       declineRequest: handleDeclineRequest,
       deleteRequest: handleDeleteRequest,
